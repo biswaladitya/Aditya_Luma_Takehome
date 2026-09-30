@@ -42,6 +42,7 @@ class CatalogImportTests(unittest.TestCase):
         self.directory = Path(temporary.name)
         env = patch.dict(os.environ, {
             "DATABASE_PATH": str(self.directory / "catalog.sqlite3"), "DATA_DIR": "",
+            "SLACK_APP_TOKEN": "", "SLACK_BOT_TOKEN": "",  # Never open a real Slack socket in tests.
         })
         env.start()
         self.addCleanup(env.stop)

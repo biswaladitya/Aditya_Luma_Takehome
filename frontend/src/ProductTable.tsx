@@ -1,4 +1,5 @@
-import type { CatalogRow, FieldChanges, GenerationStatus } from './catalogApi'
+import GenerationProgress from './GenerationProgress'
+import { batchProgress, canSelect, isGenerating, type CatalogRow, type FieldChanges, type GeneratedImage, type GenerationStatus, type ReviewState } from './catalogApi'
 
 const fieldNames: Record<string, string> = {
   sku: 'SKU', product_name: 'Product name', category: 'Category', color: 'Color / Finish',
@@ -10,6 +11,17 @@ const statusLabels: Record<GenerationStatus, string> = {
   changed_since_generation: 'Image needs review', already_generated: 'Up to date',
 }
 
+const reviewLabels: Record<ReviewState, string> = {
+  pending_send: 'Sending to Slack', awaiting_approval: 'Awaiting Ellie', approved: 'Approved',
+}
+
+function imageLabel(image: GeneratedImage, row: CatalogRow) {
+  if (!image.review) return 'Not sent'
+  if (image.review.state === 'approved') return 'Approved'
+  if (image.review.state === 'pending_send') return image.review.send_error ? 'Send failed' : 'Sending…'
+  return row.review_status === 'approved' ? 'Not selected' : 'Awaiting Ellie'
+}
+
 function Changes({ changes }: { changes: FieldChanges }) {
   return <dl className="field-changes">
     {Object.entries(changes).map(([field, change]) => <div key={field}>
@@ -19,11 +31,18 @@ function Changes({ changes }: { changes: FieldChanges }) {
   </dl>
 }
 
-export default function ProductTable({ rows, preview = false }: { rows: CatalogRow[]; preview?: boolean }) {
+export type SlackSend = { send: (sku: string) => void; disabled: boolean }
+
+export type Selection = { selected: Set<string>; toggle: (sku: string) => void; disabled: boolean }
+
+export default function ProductTable({ rows, preview = false, selection, slack, perRequest = 2 }: { rows: CatalogRow[]; preview?: boolean; selection?: Selection; slack?: SlackSend; perRequest?: number }) {
   if (!rows.length) return <div className="empty-state">No products to show.</div>
   return <div className="table-wrap"><table className="product-table">
-    <thead><tr><th>PRODUCT</th><th>SHOT IDEA</th>{preview && <th>CATALOG CHANGES</th>}<th>IMAGE STATUS</th></tr></thead>
+    <thead><tr>{selection && <th aria-label="Select" />}<th>PRODUCT</th><th>SHOT IDEA</th>{preview && <th>CATALOG CHANGES</th>}<th>IMAGE STATUS</th></tr></thead>
     <tbody>{rows.map((row, index) => <tr key={`${row.sku}-${row.row_number ?? index}`}>
+      {selection && <td className="select-cell">{canSelect(row)
+        ? <input type="checkbox" aria-label={`Select ${row.product_name || row.sku}`} checked={selection.selected.has(row.sku)} disabled={selection.disabled} onChange={() => selection.toggle(row.sku)} />
+        : null}</td>}
       <td>
         <div className="product-cell">
           <div className="product-image">{/^https?:\/\//i.test(row.photo) ? <img src={row.photo} alt="" loading="lazy" /> : <span>NO PHOTO</span>}</div>
@@ -42,7 +61,12 @@ export default function ProductTable({ rows, preview = false }: { rows: CatalogR
         <span className={`status ${row.generation_status === 'already_generated' ? 'ready' : 'needs-input'}`}>{statusLabels[row.generation_status]}</span>
         {row.issues.length > 0 && <p className="row-issues">{row.issues.join(' · ')}</p>}
         {Object.keys(row.generation_changes).length > 0 && <details className="product-details"><summary>Changed since generation</summary><Changes changes={row.generation_changes} /></details>}
-        {row.images.length > 0 && <div className="generated-images">{row.images.map(image => image.image_url ? <a key={image.id} href={image.image_url} target="_blank" rel="noreferrer"><img src={image.image_url} alt={`Generated image for ${row.product_name}`} loading="lazy" /></a> : null)}<small>{row.images.length} saved {row.images.length === 1 ? 'image' : 'images'}</small></div>}
+        {isGenerating(row) && <GenerationProgress label="Generating" progress={batchProgress([row], perRequest)} />}
+        {row.review_status && <p><span className={`status review-${row.review_status}`}>{reviewLabels[row.review_status]}</span></p>}
+        {row.send_error && <p className="row-issues">Slack: {row.send_error}</p>}
+        {slack && row.can_send && <button className="secondary-button" disabled={slack.disabled} onClick={() => slack.send(row.sku)}>{row.send_error ? 'Retry send to Slack' : 'Send to Slack'}</button>}
+        {row.images.some(i => i.status === 'failed') && <p className="row-issues">{row.images.filter(i => i.status === 'failed').length} failed: {row.images.find(i => i.status === 'failed')?.error}</p>}
+        {row.images.some(i => i.status === 'done') && <div className="generated-images">{row.images.filter(i => i.status === 'done' && i.image_url).map(image => <figure key={image.id} className={`generated-image ${image.review?.state === 'approved' ? 'approved' : ''}`}><a href={image.image_url} target="_blank" rel="noreferrer"><img src={image.image_url} alt={`Generated image v${image.version} for ${row.product_name}`} loading="lazy" /></a><figcaption>{imageLabel(image, row)}</figcaption></figure>)}<small>{row.images.filter(i => i.status === 'done').length} saved images</small></div>}
       </td>
     </tr>)}</tbody>
   </table></div>

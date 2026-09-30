@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react'
-import { catalogRequest, confirmCatalogUpdate, uploadCatalogPreview, type Catalog, type CatalogPreview } from './catalogApi'
+import GenerationProgress from './GenerationProgress'
+import { batchProgress, canSelect, catalogRequest, confirmCatalogUpdate, generateImages, isGenerating, isInReview, sendForReview, uploadCatalogPreview, type Catalog, type CatalogPreview } from './catalogApi'
 import ProductTable from './ProductTable'
 
 const PENDING_IMPORT_KEY = 'luma.pendingImport'
@@ -20,6 +21,74 @@ export default function App() {
   const [error, setError] = useState('')
   const [confirmationError, setConfirmationError] = useState('')
   const [dragging, setDragging] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [generating, setGenerating] = useState(false)
+  const [generationMessage, setGenerationMessage] = useState('')
+  const [batchSkus, setBatchSkus] = useState<string[]>([])
+  const [sendingToSlack, setSendingToSlack] = useState(false)
+  const [slackMessage, setSlackMessage] = useState('')
+  const anyGenerating = Boolean(catalog?.rows.some(isGenerating))
+  const anyInReview = Boolean(catalog?.rows.some(isInReview))
+  const sendable = catalog ? catalog.rows.filter(row => row.can_send) : []
+  const perRequest = catalog?.generation_config.images_per_request ?? 2
+  // Track the SKUs of the running request; after a reload, fall back to whatever is generating.
+  const batchRows = catalog ? catalog.rows.filter(row => batchSkus.includes(row.sku) || isGenerating(row)) : []
+  const progress = batchProgress(batchRows, perRequest)
+
+  // Refresh while Luma jobs run or Slack is pending, so thumbnails, failures and Ellie's decision appear without a reload.
+  useEffect(() => {
+    if (!anyGenerating && !anyInReview) return
+    const timer = setInterval(() => {
+      catalogRequest<Catalog>('/api/catalog').then(setCatalog).catch(() => { /* Retry on the next tick. */ })
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [anyGenerating, anyInReview])
+
+  // Drop selections that stopped being eligible after a reload or a finished job.
+  useEffect(() => {
+    if (!catalog) return
+    const eligible = new Set(catalog.rows.filter(canSelect).map(row => row.sku))
+    setSelected(previous => previous.size && [...previous].some(sku => !eligible.has(sku)) ? new Set([...previous].filter(sku => eligible.has(sku))) : previous)
+  }, [catalog])
+
+  function toggle(sku: string) {
+    setSelected(previous => { const next = new Set(previous); if (next.has(sku)) next.delete(sku); else next.add(sku); return next })
+  }
+
+  async function generate() {
+    if (!catalog || !selected.size || generating) return
+    const { images_per_request: perRequest, est_cost_per_image_usd: unit } = catalog.generation_config
+    const images = selected.size * perRequest
+    if (!window.confirm(`Generate ${images} images (${perRequest} for each of ${selected.size} products)? Estimated cost up to $${(images * unit).toFixed(2)}.`)) return
+    setGenerating(true)
+    setGenerationMessage('')
+    try {
+      const result = await generateImages([...selected])
+      setSelected(new Set())
+      setBatchSkus(result.queued)
+      if (result.skipped.length) setGenerationMessage(`Skipped ${result.skipped.length}: ${result.skipped.map(item => `${item.sku} (${item.reason})`).join(', ')}`)
+      setCatalog(await catalogRequest<Catalog>('/api/catalog'))
+    } catch (cause) {
+      setGenerationMessage(cause instanceof Error ? cause.message : 'Could not start generation.')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  async function sendToSlack(skus: string[]) {
+    if (!skus.length || sendingToSlack) return
+    setSendingToSlack(true)
+    setSlackMessage('')
+    try {
+      const result = await sendForReview(skus)
+      if (result.skipped.length) setSlackMessage(`Skipped ${result.skipped.length}: ${result.skipped.map(item => `${item.sku} (${item.reason})`).join(', ')}`)
+      setCatalog(await catalogRequest<Catalog>('/api/catalog'))
+    } catch (cause) {
+      setSlackMessage(cause instanceof Error ? cause.message : 'Could not send to Slack.')
+    } finally {
+      setSendingToSlack(false)
+    }
+  }
 
   useEffect(() => {
     let active = true
@@ -163,7 +232,22 @@ export default function App() {
               <div className="summary-card"><span>NO SHOT IDEA</span><strong>{catalog.without_shot_idea}</strong><small>Products without a requested scene</small></div>
               <div className="summary-card"><span>NEEDS INPUT</span><strong>{catalog.generation_summary.missing_input}</strong><small>Missing details for generation</small></div>
             </div>
-            <div className="review-table"><ProductTable rows={catalog.rows} /></div>
+            <div className="review-table"><ProductTable rows={catalog.rows} selection={{ selected, toggle, disabled: generating }} slack={{ send: sku => void sendToSlack([sku]), disabled: sendingToSlack }} perRequest={perRequest} /></div>
+            {generationMessage && <div className="error" role="alert">{generationMessage}</div>}
+            {progress.total > 0 && <div className="batch-progress">
+              <GenerationProgress label={progress.active ? 'Generating images' : 'Generation finished'} progress={progress} />
+              {!progress.active && <button className="secondary-button" onClick={() => setBatchSkus([])}>Dismiss</button>}
+            </div>}
+            <div className="confirmation-bar generate-bar">
+              <div><strong>{selected.size} selected</strong><p>{selected.size ? `${selected.size * catalog.generation_config.images_per_request} images · up to $${(selected.size * catalog.generation_config.images_per_request * catalog.generation_config.est_cost_per_image_usd).toFixed(2)}` : 'Tick products above, then generate. Nothing is generated until you click.'}</p></div>
+              <button className="secondary-button" disabled={generating || !catalog.rows.some(canSelect)} onClick={() => setSelected(new Set(catalog.rows.filter(canSelect).map(row => row.sku)))}>Select all eligible</button>
+              <button className="primary-button" disabled={!selected.size || generating} onClick={() => void generate()}>{generating ? 'Starting…' : 'Generate images'}</button>
+            </div>
+            {slackMessage && <div className="error" role="alert">{slackMessage}</div>}
+            <div className="confirmation-bar generate-bar">
+              <div><strong>{sendable.length} ready for Slack</strong><p>{sendable.length ? 'Posts each product’s candidates to its own Slack thread. Only Ellie’s Approve there decides.' : 'Generated images appear here once they can be sent. Nothing is posted until you click.'}</p></div>
+              <button className="primary-button" disabled={!sendable.length || sendingToSlack} onClick={() => { if (window.confirm(`Send ${sendable.length} product${sendable.length === 1 ? '' : 's'} to Slack for review?`)) void sendToSlack(sendable.map(row => row.sku)) }}>{sendingToSlack ? 'Sending…' : 'Send all to Slack'}</button>
+            </div>
           </> : <div className="empty-state">Upload and confirm a CSV to create your saved catalog.</div>}
         </section>
       </main>

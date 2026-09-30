@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 def _absolute_path(value: str) -> Path:
@@ -33,6 +33,40 @@ def data_directory() -> Path:
     return database_path().parent
 
 
+# Review state lives beside generated_images, never inside it. See persistence.md.
+_REVIEW_SCHEMA = (
+    """CREATE TABLE image_reviews (
+        image_id TEXT PRIMARY KEY NOT NULL REFERENCES generated_images(id) ON DELETE RESTRICT,
+        product_sku TEXT NOT NULL REFERENCES products(sku) ON DELETE RESTRICT,
+        state TEXT NOT NULL DEFAULT 'pending_send'
+            CHECK (state IN ('pending_send', 'awaiting_approval', 'approved')),
+        slack_channel TEXT,
+        slack_thread_ts TEXT,
+        slack_message_ts TEXT,
+        slack_file_id TEXT,
+        send_error TEXT,
+        approved_by TEXT,
+        approved_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK ((state = 'pending_send' AND slack_message_ts IS NULL)
+            OR (state = 'awaiting_approval' AND slack_message_ts IS NOT NULL)
+            OR (state = 'approved' AND slack_message_ts IS NOT NULL
+                AND approved_by IS NOT NULL AND approved_at IS NOT NULL))
+    )""",
+    "CREATE INDEX image_reviews_product_sku ON image_reviews(product_sku)",
+    # MVP rule: at most one approved image per product, enforced by the database.
+    "CREATE UNIQUE INDEX image_reviews_one_approved_per_sku ON image_reviews(product_sku) WHERE state = 'approved'",
+    """CREATE TRIGGER image_reviews_forward_only
+        BEFORE UPDATE OF state ON image_reviews
+        WHEN NEW.state IS NOT OLD.state
+            AND NOT (OLD.state = 'pending_send' AND NEW.state = 'awaiting_approval')
+            AND NOT (OLD.state = 'awaiting_approval' AND NEW.state = 'approved')
+        BEGIN
+            SELECT RAISE(ABORT, 'review state can only move forward');
+        END""",
+)
+
 _SCHEMA = (
     """CREATE TABLE products (
         sku TEXT PRIMARY KEY NOT NULL CHECK (length(trim(sku)) > 0),
@@ -54,7 +88,10 @@ _SCHEMA = (
         generated_from TEXT NOT NULL,
         storage_key TEXT NOT NULL CHECK (length(storage_key) > 0),
         luma_generation_id TEXT,
-        generated_at TEXT NOT NULL
+        generated_at TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+        status TEXT NOT NULL DEFAULT 'done' CHECK (status IN ('queued', 'processing', 'done', 'failed')),
+        error TEXT
     )""",
     "CREATE INDEX generated_images_product_sku ON generated_images(product_sku)",
     """CREATE TRIGGER generated_images_immutable_snapshot
@@ -75,23 +112,38 @@ _SCHEMA = (
         CHECK ((status = 'pending' AND applied_at IS NULL AND result IS NULL)
             OR (status = 'applied' AND applied_at IS NOT NULL AND result IS NOT NULL))
     )""",
-)
+) + _REVIEW_SCHEMA
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if version == SCHEMA_VERSION:
         return
-    if version != 0:
+    if version == 0:
+        existing = connection.execute(
+            "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
+        ).fetchone()
+        if existing is not None:
+            raise RuntimeError("Refusing to initialize a nonempty, unversioned database")
+        # executescript implicitly commits; individual statements keep DDL atomic.
+        for statement in _SCHEMA:
+            connection.execute(statement)
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        return
+    # Upgrade one version at a time so older databases pass through every step.
+    if version == 1:
+        # v1 -> v2: generation lifecycle columns; existing rows were completed images.
+        connection.execute("ALTER TABLE generated_images ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        connection.execute("ALTER TABLE generated_images ADD COLUMN status TEXT NOT NULL DEFAULT 'done'")
+        connection.execute("ALTER TABLE generated_images ADD COLUMN error TEXT")
+        version = 2
+    if version == 2:
+        # v2 -> v3: Slack review state; existing images simply have no review row yet.
+        for statement in _REVIEW_SCHEMA:
+            connection.execute(statement)
+        version = 3
+    if version != SCHEMA_VERSION:
         raise RuntimeError(f"Unsupported catalog schema version: {version}")
-    existing = connection.execute(
-        "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
-    ).fetchone()
-    if existing is not None:
-        raise RuntimeError("Refusing to initialize a nonempty, unversioned database")
-    # executescript implicitly commits; individual statements keep DDL atomic.
-    for statement in _SCHEMA:
-        connection.execute(statement)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 

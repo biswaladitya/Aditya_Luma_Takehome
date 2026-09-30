@@ -22,6 +22,7 @@ def _json(value: object) -> str:
 def _image(row: sqlite3.Row) -> dict:
     image = dict(row)
     image["generated_from"] = json.loads(image["generated_from"])
+    image["review"] = None  # Filled from image_reviews by get_products.
     return image
 
 
@@ -54,6 +55,15 @@ def get_products(connection: sqlite3.Connection, skus: list[str] | None = None) 
         )
         for row in images:
             products[row["product_sku"]]["images"].append(_image(row))
+        by_id = {image["id"]: image for sku in batch for image in products[sku]["images"]}
+        reviews = connection.execute(
+            "SELECT image_id, state, send_error, approved_by, approved_at FROM image_reviews "
+            f"WHERE product_sku IN ({placeholders})", batch
+        )
+        for row in reviews:
+            by_id[row["image_id"]]["review"] = {
+                key: row[key] for key in ("state", "send_error", "approved_by", "approved_at")
+            }
     return list(products.values())
 
 
@@ -134,6 +144,9 @@ def save_generated_image(
     generated_from: dict,
     storage_key: str,
     luma_generation_id: str | None = None,
+    *,
+    version: int = 1,
+    status: str = "done",
 ) -> dict:
     """Append a reference and the exact submitted snapshot, never current attributes.
 
@@ -143,10 +156,29 @@ def save_generated_image(
     image_id = str(uuid4())
     connection.execute(
         "INSERT INTO generated_images "
-        "(id, product_sku, generated_from, storage_key, luma_generation_id, generated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (image_id, sku, _json(generated_from), storage_key, luma_generation_id, _now()),
+        "(id, product_sku, generated_from, storage_key, luma_generation_id, generated_at, version, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (image_id, sku, _json(generated_from), storage_key, luma_generation_id, _now(), version, status),
     )
     return _image(connection.execute(
         "SELECT * FROM generated_images WHERE id = ?", (image_id,)
     ).fetchone())
+
+
+def update_generated_image(connection: sqlite3.Connection, image_id: str, **fields: object) -> None:
+    """Update lifecycle fields only; the generated_from snapshot stays immutable."""
+    allowed = {"status", "error", "storage_key", "luma_generation_id"}
+    if not fields or set(fields) - allowed:
+        raise ValueError(f"Updatable fields: {sorted(allowed)}")
+    assignments = ", ".join(f"{key} = ?" for key in fields)
+    connection.execute(
+        f"UPDATE generated_images SET {assignments} WHERE id = ?", [*fields.values(), image_id]
+    )
+
+
+def fail_unfinished_images(connection: sqlite3.Connection, reason: str) -> int:
+    """Mark jobs left queued/processing by a restart as failed so the UI never spins forever."""
+    return connection.execute(
+        "UPDATE generated_images SET status = 'failed', error = ? "
+        "WHERE status IN ('queued', 'processing')", (reason,)
+    ).rowcount

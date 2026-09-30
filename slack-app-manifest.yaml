@@ -1,0 +1,21 @@
+# Slack app manifest for the Shot Review bot (Socket Mode, no public URLs).
+# Paste into api.slack.com/apps > Create New App > From a manifest (YAML tab).
+display_information:
+  name: Shot Review
+  description: Review AI-styled product photos and approve or reject them right in Slack.
+features:
+  bot_user:
+    display_name: Shot Review
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - chat:write   # chat.postMessage and chat.update in channels the bot is invited to
+      - files:write  # files_upload_v2 for candidate images (used via slack_file image blocks)
+settings:
+  # Button clicks (block_actions) are delivered over Socket Mode, so no request_url.
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

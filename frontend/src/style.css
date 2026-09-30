@@ -44,3 +44,22 @@ button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px soli
   .confirmation-bar > div { flex-basis: 100%; }
   .catalog-title { gap: 16px; }
 }
+
+.select-cell { width: 2rem; text-align: center; }
+.generate-bar { position: sticky; bottom: 0; z-index: 5; }
+
+.progress { margin-top: 0.5rem; min-width: 12rem; }
+.progress-label { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.75rem; letter-spacing: 0.04em; margin-bottom: 0.3rem; }
+.progress-track { height: 6px; border-radius: 3px; background: rgba(128, 128, 128, 0.25); overflow: hidden; }
+.progress-fill { height: 100%; background: currentColor; border-radius: 3px; transition: width 0.4s ease; }
+.progress-track.active .progress-fill { background-image: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent); background-size: 200% 100%; background-color: currentColor; animation: progress-sheen 1.4s linear infinite; }
+@keyframes progress-sheen { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .progress-track.active .progress-fill { animation: none; } }
+.batch-progress { display: flex; align-items: flex-end; gap: 1rem; margin: 1rem 0; }
+.batch-progress .progress { flex: 1; margin: 0; }
+.generated-image { margin: 0; text-align: center; }
+.generated-image figcaption { font-size: 9px; letter-spacing: .06em; color: #7a8b7e; margin-top: 3px; }
+.generated-image.approved img { outline: 2px solid #2e6b3a; }
+.generated-image.approved figcaption { color: #2e6b3a; font-weight: 700; }
+.review-awaiting_approval, .review-pending_send { background: #fff0e3; color: #9d592c; }
+.review-approved { background: #e8f2e6; color: #2e6b3a; }

@@ -19,6 +19,9 @@ COLUMNS = {
 ATTRIBUTES = tuple(COLUMNS.values())
 REQUIRED_COLUMNS = tuple(COLUMNS)
 MAX_CSV_BYTES = 5 * 1024 * 1024
+IMAGES_PER_REQUEST = 2
+# Upper end of Luma's published uni-1 reference-image price range (USD per image).
+EST_COST_PER_IMAGE_USD = 0.0644
 GENERATION_STATUSES = (
     "never_generated", "changed_since_generation", "already_generated", "missing_input"
 )
@@ -110,31 +113,56 @@ def product_view(row: dict) -> dict:
     result["issues"] = list(row.get("issues", input_issues(row)))
     result["ready"] = not result["issues"] and row.get("change_type") != "invalid"
     result["images"] = [
-        {**image, "image_url": f"/api/catalog/images/{image['id']}"}
+        {**image, "image_url": f"/api/catalog/images/{image['id']}"} if image["status"] == "done" else image
         for image in row.get("images", [])
     ]
-    result["image_exists"] = bool(result["images"])
-    matching = any(not changes_between(image["generated_from"], row) for image in result["images"])
+    # Only completed images count as generations; queued and failed rows are just attempts.
+    done = [image for image in result["images"] if image["status"] == "done"]
+    result["image_exists"] = bool(done)
+    matching = any(not changes_between(image["generated_from"], row) for image in done)
     result["generation_changes"] = {}
-    if result["images"] and not matching:
-        latest = max(result["images"], key=lambda image: (image["generated_at"], image["id"]))
+    if done and not matching:
+        latest = max(done, key=lambda image: (image["generated_at"], image["id"]))
         result["generation_changes"] = changes_between(latest["generated_from"], row)
     if not result["ready"]:
         status = "missing_input"
     elif matching:
         status = "already_generated"
-    elif result["images"]:
+    elif done:
         status = "changed_since_generation"
     else:
         status = "never_generated"
     result["generation_status"] = status
+    result.update(review_summary(done, row))
     return result
+
+
+def review_summary(done: list[dict], row: dict) -> dict:
+    """Derive review state from the images; nothing is stored on the product."""
+    reviews = [image["review"] for image in done if image["review"]]
+    approved = next((image for image in done if (image["review"] or {}).get("state") == "approved"), None)
+    states = {review["state"] for review in reviews}
+    # Only images made from the current product details may go to Slack; failed sends can retry.
+    reviewable = [
+        image["id"] for image in done
+        if not changes_between(image["generated_from"], row)
+        and (image["review"] is None or (image["review"]["state"] == "pending_send" and image["review"]["send_error"]))
+    ]
+    return {
+        "review_status": "approved" if approved else next(
+            (state for state in ("awaiting_approval", "pending_send") if state in states), None),
+        "approved_image_id": approved["id"] if approved else None,
+        "send_error": next((r["send_error"] for r in reviews if r["send_error"]), None),
+        "reviewable_image_ids": [] if approved else reviewable,
+        "can_send": bool(reviewable) and not approved,
+    }
 
 
 def summarize(rows: list[dict]) -> dict:
     with_idea = sum(bool(row["shot_idea"]) for row in rows)
     return {
-        "rows": rows, "total_rows": len(rows), "with_shot_idea": with_idea,
+        "rows": rows, "total_rows": len(rows),
+        "generation_config": {"images_per_request": IMAGES_PER_REQUEST, "est_cost_per_image_usd": EST_COST_PER_IMAGE_USD}, "with_shot_idea": with_idea,
         "without_shot_idea": len(rows) - with_idea,
         # Eligibility is independent of whether a matching image already exists.
         "ready_to_generate": sum(bool(row["ready"]) for row in rows),
