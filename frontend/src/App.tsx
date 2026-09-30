@@ -1,51 +1,89 @@
-import { useRef, useState, type ChangeEvent, type DragEvent } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react'
+import { catalogRequest, confirmCatalogUpdate, uploadCatalogPreview, type Catalog, type CatalogPreview } from './catalogApi'
+import ProductTable from './ProductTable'
 
-type CatalogRow = {
-  row_number: number
-  sku: string
-  product_name: string
-  category: string
-  color: string
-  photo: string
-  shot_idea: string
-  issues: string[]
-  ready: boolean
-}
+const PENDING_IMPORT_KEY = 'luma.pendingImport'
 
-type CatalogPreview = {
-  filename: string
-  total_rows: number
-  with_shot_idea: number
-  without_shot_idea: number
-  ready_to_generate: number
-  with_issues: number
-  rows_with_shot_idea: CatalogRow[]
+function rememberPreview(id: string | null) {
+  try {
+    if (id) localStorage.setItem(PENDING_IMPORT_KEY, id)
+    else localStorage.removeItem(PENDING_IMPORT_KEY)
+  } catch { /* The preview remains usable when browser storage is unavailable. */ }
 }
 
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null)
+  const operationRef = useRef(false)
   const [preview, setPreview] = useState<CatalogPreview | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [catalog, setCatalog] = useState<Catalog | null>(null)
+  const [busy, setBusy] = useState<'loading' | 'uploading' | 'confirming' | null>('loading')
   const [error, setError] = useState('')
+  const [confirmationError, setConfirmationError] = useState('')
   const [dragging, setDragging] = useState(false)
 
+  useEffect(() => {
+    let active = true
+    async function restore() {
+      operationRef.current = true
+      try {
+        const saved = await catalogRequest<Catalog>('/api/catalog')
+        if (!active) return
+        setCatalog(saved)
+        let pendingId: string | null = null
+        try { pendingId = localStorage.getItem(PENDING_IMPORT_KEY) } catch { /* Optional browser state. */ }
+        if (pendingId) {
+          const pending = await catalogRequest<CatalogPreview>(`/api/catalog/imports/${encodeURIComponent(pendingId)}`)
+          if (!active) return
+          setPreview(pending)
+          if (pending.status === 'applied') rememberPreview(null)
+        }
+      } catch (cause) {
+        if (active) setError(cause instanceof Error ? cause.message : 'Could not restore the catalog.')
+      } finally {
+        if (active) { operationRef.current = false; setBusy(null) }
+      }
+    }
+    void restore()
+    return () => { active = false }
+  }, [])
+
   async function upload(file?: File) {
-    if (!file) return
-    setLoading(true)
+    if (!file || operationRef.current) return
+    operationRef.current = true
+    setBusy('uploading')
     setError('')
-    setPreview(null)
-    const form = new FormData()
-    form.append('file', file)
+    setConfirmationError('')
     try {
-      const response = await fetch('/api/catalog/preview', { method: 'POST', body: form })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.detail || 'Could not read this CSV.')
-      setPreview(data as CatalogPreview)
+      const result = await uploadCatalogPreview(file)
+      setPreview(result)
+      rememberPreview(result.preview_id)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not upload this CSV.')
     } finally {
-      setLoading(false)
+      operationRef.current = false
+      setBusy(null)
       if (inputRef.current) inputRef.current.value = ''
+    }
+  }
+
+  async function confirm() {
+    if (!preview || operationRef.current || !preview.can_confirm || preview.status !== 'pending') return
+    operationRef.current = true
+    setBusy('confirming')
+    setError('')
+    setConfirmationError('')
+    try {
+      const applied = await confirmCatalogUpdate(preview.preview_id)
+      setPreview(applied)
+      rememberPreview(null)
+      setCatalog(await catalogRequest<Catalog>('/api/catalog'))
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Could not update the catalog.'
+      setConfirmationError(message)
+      setError(message)
+    } finally {
+      operationRef.current = false
+      setBusy(null)
     }
   }
 
@@ -67,63 +105,67 @@ export default function App() {
       </header>
 
       <main>
-        <div className="eyebrow"><span className="eyebrow-line" /> WORKSPACE <span className="eyebrow-muted">/ 01 IMPORT</span></div>
+        <div className="eyebrow"><span className="eyebrow-line" /> WORKSPACE <span className="eyebrow-muted">/ CATALOG</span></div>
         <section className="intro">
           <div>
             <h1>Bring your catalog<br /><em>into focus.</em></h1>
-            <p>Upload the latest CSV to see which products have a shot idea and which are ready for the next step.</p>
+            <p>Upload your latest CSV, review what changed, and update your saved product catalog when you’re ready.</p>
           </div>
-          <div className="step-indicator"><span>01</span><span className="step-rule" /><span>IMPORT CATALOG</span></div>
+          <div className="step-indicator"><span>01</span><span className="step-rule" /><span>IMPORT & REVIEW</span></div>
         </section>
 
         <section className="upload-section" aria-label="Upload catalog">
           <div className="section-heading"><span>01 / SOURCE FILE</span><span>CSV FORMAT</span></div>
-          <div
-            className={`dropzone ${dragging ? 'dragging' : ''}`}
-            onDragOver={(event) => { event.preventDefault(); setDragging(true) }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={onDrop}
-          >
+          <div className={`dropzone ${dragging ? 'dragging' : ''}`}
+            onDragOver={event => { event.preventDefault(); if (!busy) setDragging(true) }}
+            onDragLeave={() => setDragging(false)} onDrop={onDrop} aria-busy={busy === 'uploading'}>
             <div className="upload-icon">↑</div>
-            <h2>{loading ? 'Reading your catalog…' : 'Drop your catalog here'}</h2>
+            <h2>{busy === 'uploading' ? 'Comparing your catalog…' : 'Drop your catalog here'}</h2>
             <p>or choose a CSV from your computer</p>
-            <input ref={inputRef} id="catalog-file" type="file" accept=".csv,text/csv" onChange={onFileChange} disabled={loading} />
-            <button type="button" className="primary-button" onClick={() => inputRef.current?.click()} disabled={loading}>Choose CSV <span>↗</span></button>
-            <small>No images are generated when you upload.</small>
+            <input ref={inputRef} id="catalog-file" type="file" accept=".csv,text/csv" onChange={onFileChange} disabled={Boolean(busy)} />
+            <button type="button" className="primary-button" onClick={() => inputRef.current?.click()} disabled={Boolean(busy)}>Choose CSV <span>↗</span></button>
+            <small>You’ll review changes before updating the catalog.</small>
           </div>
-          {preview && <div className="upload-success" role="status">
-            <span className="success-icon" aria-hidden="true">✓</span>
-            <div><strong>CSV uploaded successfully</strong><span>{preview.filename} · {preview.total_rows} {preview.total_rows === 1 ? 'product' : 'products'} processed</span></div>
-          </div>}
           {error && <div className="error" role="alert">{error}</div>}
         </section>
 
-        {preview && <>
-          <section className="results" aria-live="polite">
-            <div className="section-heading"><span>02 / IMPORT PREVIEW</span><span className="filename">{preview.filename}</span></div>
+        {preview && <section className="results" aria-label="Import review">
+          <div className="upload-success" role="status">
+            <span className="success-icon" aria-hidden="true">✓</span>
+            <div><strong>{preview.status === 'applied' ? 'Product catalog updated' : 'CSV uploaded successfully — ready for review'}</strong><span>{preview.filename} · {preview.total_rows} products · {preview.with_shot_idea} with Shot Ideas · {preview.without_shot_idea} without</span></div>
+          </div>
+          {preview.status === 'pending' && <>
+            <div className="catalog-title"><h2>Review your changes</h2><p>These changes have not been applied.</p></div>
             <div className="summary-grid">
-              <div className="summary-card"><span>TOTAL PRODUCTS</span><strong>{preview.total_rows}</strong><small>Rows in this catalog</small></div>
-              <div className="summary-card accent"><span>WITH SHOT IDEA</span><strong>{preview.with_shot_idea}</strong><small>Requests captured</small></div>
-              <div className="summary-card"><span>NO SHOT IDEA</span><strong>{preview.without_shot_idea}</strong><small>Not requested yet</small></div>
-              <div className="summary-card"><span>READY</span><strong>{preview.ready_to_generate}</strong><small>Idea and required details present</small></div>
+              <div className="summary-card accent"><span>NEW PRODUCTS</span><strong>{preview.new_count}</strong><small>Not in the saved catalog</small></div>
+              <div className="summary-card"><span>CHANGED PRODUCTS</span><strong>{preview.changed_count}</strong><small>Review previous and proposed values</small></div>
+              <div className="summary-card"><span>UNCHANGED</span><strong>{preview.unchanged_count}</strong><small>Existing results will be retained</small></div>
+              <div className="summary-card"><span>NEEDS CORRECTION</span><strong>{preview.invalid_count}</strong><small>Rows that cannot be matched by SKU</small></div>
             </div>
-            {preview.with_issues > 0 && <p className="issue-note">{preview.with_issues} {preview.with_issues === 1 ? 'row has' : 'rows have'} missing or duplicate details. Check the labels below before proceeding.</p>}
-          </section>
+            {!preview.can_confirm && <div className="issue-note">{preview.errors.length ? preview.errors.map((message, i) => <p key={i}>{message}</p>) : <p>Correct the CSV and upload it again before updating the catalog.</p>}</div>}
+            <div className="review-table"><ProductTable rows={preview.rows} preview /></div>
+            {confirmationError && <div className="error" role="alert">{confirmationError}</div>}
+            <div className="confirmation-bar">
+              <div><strong>Apply this upload to the product catalog</strong><p>Existing images stay saved. Generating images is a separate action.</p></div>
+              <button className="secondary-button" disabled={Boolean(busy)} onClick={() => { setPreview(null); rememberPreview(null); setError(''); setConfirmationError('') }}>Dismiss preview</button>
+              <button className="primary-button" disabled={Boolean(busy) || !preview.can_confirm} onClick={() => void confirm()}>{busy === 'confirming' ? 'Updating catalog…' : 'Update product catalog'}</button>
+            </div>
+          </>}
+        </section>}
 
-          <section className="catalog-section">
-            <div className="section-heading"><span>03 / SHOT REQUESTS</span><span>{preview.with_shot_idea} ROWS</span></div>
-            <div className="catalog-title"><h2>Ideas in the queue</h2><p>Rows with a populated Shot Idea.</p></div>
-            {preview.rows_with_shot_idea.length === 0 ? <div className="empty-state">No shot ideas were found in this CSV.</div> :
-              <div className="table-wrap"><table>
-                <thead><tr><th>PRODUCT</th><th>SHOT IDEA</th><th>STATUS</th></tr></thead>
-                <tbody>{preview.rows_with_shot_idea.map((row) => <tr key={row.row_number}>
-                  <td><div className="product-cell"><div className="product-image">{row.photo ? <img src={row.photo} alt="" loading="lazy" /> : <span>NO PHOTO</span>}</div><div><strong>{row.product_name || 'Unnamed product'}</strong><small>{row.sku || `Row ${row.row_number}`}{row.color ? ` · ${row.color}` : ''}</small></div></div></td>
-                  <td className="idea-cell">{row.shot_idea}</td>
-                  <td>{row.ready ? <span className="status ready">READY</span> : <span className="status needs-input" title={row.issues.join(', ')}>{row.issues.join(', ')}</span>}</td>
-                </tr>)}</tbody>
-              </table></div>}
-          </section>
-        </>}
+        <section className="catalog-section" aria-label="Saved product catalog">
+          <div className="section-heading"><span>02 / SAVED CATALOG</span><span>{catalog?.total_rows ?? 0} PRODUCTS</span></div>
+          <div className="catalog-title"><h2>Your product catalog</h2><p>Confirmed products and saved generation results.</p></div>
+          {busy === 'loading' ? <p role="status">Loading saved catalog…</p> : catalog && catalog.total_rows > 0 ? <>
+            <div className="summary-grid">
+              <div className="summary-card accent"><span>NEEDS GENERATION</span><strong>{catalog.generation_summary.never_generated + catalog.generation_summary.changed_since_generation}</strong><small>New images or changed product details</small></div>
+              <div className="summary-card"><span>UP TO DATE</span><strong>{catalog.generation_summary.already_generated}</strong><small>Images match current details</small></div>
+              <div className="summary-card"><span>NO SHOT IDEA</span><strong>{catalog.without_shot_idea}</strong><small>Products without a requested scene</small></div>
+              <div className="summary-card"><span>NEEDS INPUT</span><strong>{catalog.generation_summary.missing_input}</strong><small>Missing details for generation</small></div>
+            </div>
+            <div className="review-table"><ProductTable rows={catalog.rows} /></div>
+          </> : <div className="empty-state">Upload and confirm a CSV to create your saved catalog.</div>}
+        </section>
       </main>
       <footer><span>LUMA / SHOT PRODUCTION</span><span>CATALOG IMPORT</span></footer>
     </div>

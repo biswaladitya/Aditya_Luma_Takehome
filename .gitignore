@@ -2,6 +2,11 @@
 .env.local
 .take-home-token
 node_modules/
+frontend/dist/
+*.tsbuildinfo
+.run/
+runtime/catalog.sqlite3*
+runtime/images/
 __pycache__/
 .venv/
 .DS_Store

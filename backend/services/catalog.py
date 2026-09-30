@@ -1,83 +1,184 @@
-"""Parse a customer CSV into a reviewable catalog preview."""
+"""Catalog views and generation provenance, without generation side effects."""
 
 import csv
 import io
 from collections import Counter
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from litestar.exceptions import HTTPException
 
-REQUIRED_COLUMNS = ("SKU", "Product Name", "Photo", "Shot Idea")
+from backend.db import data_directory, database
+from backend.repositories import products
+
+COLUMNS = {
+    "SKU": "sku", "Product Name": "product_name", "Category": "category",
+    "Color / Finish": "color", "Material": "material", "Price": "price",
+    "Photo": "photo", "Shot Idea": "shot_idea", "Notes": "notes",
+}
+ATTRIBUTES = tuple(COLUMNS.values())
+REQUIRED_COLUMNS = tuple(COLUMNS)
 MAX_CSV_BYTES = 5 * 1024 * 1024
+GENERATION_STATUSES = (
+    "never_generated", "changed_since_generation", "already_generated", "missing_input"
+)
 
 
-def parse_catalog(content: bytes, filename: str) -> dict:
+def attributes(row: dict) -> dict:
+    return {key: row[key] for key in ATTRIBUTES}
+
+
+def changes_between(before: dict, after: dict) -> dict:
+    return {
+        key: {"before": before.get(key), "after": after[key]}
+        for key in ATTRIBUTES if before.get(key) != after[key]
+    }
+
+
+def input_issues(row: dict) -> list[str]:
+    issues = []
+    if not row["sku"]:
+        issues.append("Missing SKU: provide a unique SKU before confirming.")
+    if not row["product_name"]:
+        issues.append("Missing product name")
+    if not row["shot_idea"]:
+        issues.append("Missing Shot Idea")
+    photo = row["photo"]
+    if not photo:
+        issues.append("Missing source photo")
+    else:
+        try:
+            url = urlsplit(photo)
+            valid = url.scheme in ("http", "https") and bool(url.hostname)
+            valid = valid and not any(char.isspace() for char in photo)
+            _ = url.port
+        except ValueError:
+            valid = False
+        if not valid:
+            issues.append("Source photo must be a valid HTTP or HTTPS URL")
+    return issues
+
+
+def parse_catalog(content: bytes, filename: str) -> list[dict]:
+    """Parse all nine columns; incomplete records must never clear saved fields."""
     if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Choose a CSV file.")
     if not content:
         raise HTTPException(status_code=400, detail="The CSV file is empty.")
     if len(content) > MAX_CSV_BYTES:
         raise HTTPException(status_code=413, detail="CSV files must be 5 MB or smaller.")
-
     try:
         csv_text = content.decode("utf-8-sig")
+        if "\x00" in csv_text:
+            raise HTTPException(status_code=400, detail="CSV contains invalid null characters.")
         reader = csv.DictReader(io.StringIO(csv_text, newline=""), strict=True)
         headers = reader.fieldnames or []
         missing = [column for column in REQUIRED_COLUMNS if column not in headers]
         if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing required columns: {', '.join(missing)}.",
-            )
+            raise HTTPException(status_code=400, detail=f"Missing required columns: {', '.join(missing)}.")
         if len(headers) != len(set(headers)):
             raise HTTPException(status_code=400, detail="CSV columns must have unique names.")
-
         rows = []
-        for line_number, record in enumerate(reader, start=2):
-            if None in record or all(not (value or "").strip() for value in record.values()):
-                if None in record:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Row {line_number} has more cells than the header.",
-                    )
-                continue
-            values = {key: (value or "").strip() for key, value in record.items()}
-            rows.append(
-                {
-                    "row_number": line_number,
-                    "sku": values["SKU"],
-                    "product_name": values["Product Name"],
-                    "category": values.get("Category", ""),
-                    "color": values.get("Color / Finish", ""),
-                    "photo": values["Photo"],
-                    "shot_idea": values["Shot Idea"],
-                }
-            )
+        for record in reader:
+            if None in record or any(value is None for value in record.values()):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Row ending at line {reader.line_num} has a different number of cells than the header. Supply all nine columns, including blank cells.",
+                )
+            rows.append({
+                **{key: record[column].strip() for column, key in COLUMNS.items()},
+                "row_number": reader.line_num,
+            })
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded.") from exc
     except csv.Error as exc:
         raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}.") from exc
-
+    if not rows:
+        raise HTTPException(status_code=400, detail="The CSV has no product rows.")
     sku_counts = Counter(row["sku"] for row in rows if row["sku"])
     for row in rows:
-        row["issues"] = []
-        if not row["sku"]:
-            row["issues"].append("Missing SKU")
-        elif sku_counts[row["sku"]] > 1:
-            row["issues"].append("Duplicate SKU")
-        if not row["product_name"]:
-            row["issues"].append("Missing product name")
-        if not row["photo"]:
-            row["issues"].append("Missing source photo")
-        row["ready"] = bool(row["shot_idea"] and not row["issues"])
+        row["issues"] = input_issues(row)
+        row["change_type"] = "invalid" if not row["sku"] or sku_counts[row["sku"]] > 1 else "new"
+        if row["sku"] and sku_counts[row["sku"]] > 1:
+            row["issues"].append(f"Duplicate SKU '{row['sku']}': keep only one row per SKU before confirming.")
+    return rows
 
-    with_ideas = [row for row in rows if row["shot_idea"]]
+
+def product_view(row: dict) -> dict:
+    """Compare current attributes with every immutable saved generation snapshot."""
+    result = dict(row)
+    result["issues"] = list(row.get("issues", input_issues(row)))
+    result["ready"] = not result["issues"] and row.get("change_type") != "invalid"
+    result["images"] = [
+        {**image, "image_url": f"/api/catalog/images/{image['id']}"}
+        for image in row.get("images", [])
+    ]
+    result["image_exists"] = bool(result["images"])
+    matching = any(not changes_between(image["generated_from"], row) for image in result["images"])
+    result["generation_changes"] = {}
+    if result["images"] and not matching:
+        latest = max(result["images"], key=lambda image: (image["generated_at"], image["id"]))
+        result["generation_changes"] = changes_between(latest["generated_from"], row)
+    if not result["ready"]:
+        status = "missing_input"
+    elif matching:
+        status = "already_generated"
+    elif result["images"]:
+        status = "changed_since_generation"
+    else:
+        status = "never_generated"
+    result["generation_status"] = status
+    return result
+
+
+def summarize(rows: list[dict]) -> dict:
+    with_idea = sum(bool(row["shot_idea"]) for row in rows)
     return {
-        "filename": filename,
-        "total_rows": len(rows),
-        "with_shot_idea": len(with_ideas),
-        "without_shot_idea": len(rows) - len(with_ideas),
-        "ready_to_generate": sum(row["ready"] for row in rows),
+        "rows": rows, "total_rows": len(rows), "with_shot_idea": with_idea,
+        "without_shot_idea": len(rows) - with_idea,
+        # Eligibility is independent of whether a matching image already exists.
+        "ready_to_generate": sum(bool(row["ready"]) for row in rows),
         "with_issues": sum(bool(row["issues"]) for row in rows),
-        "rows_with_shot_idea": with_ideas,
+        "generation_summary": {
+            status: sum(row["generation_status"] == status for row in rows)
+            for status in GENERATION_STATUSES
+        },
     }
 
+
+def get_catalog(*, candidates_only: bool = False) -> dict:
+    with database() as connection:
+        rows = [product_view(row) for row in products.get_products(connection)]
+    if candidates_only:
+        rows = [row for row in rows if row["generation_status"] in ("never_generated", "changed_since_generation")]
+    return summarize(rows)
+
+
+def record_generated_image(
+    sku: str, generated_from: dict, storage_key: str, luma_generation_id: str | None = None
+) -> dict:
+    """Record the exact inputs used by a completed generation, even after edits."""
+    if set(generated_from) != set(ATTRIBUTES) or generated_from.get("sku") != sku:
+        raise ValueError("generated_from must contain the exact nine generation input attributes for this SKU")
+    with database() as connection:
+        return products.save_generated_image(
+            connection, sku, dict(generated_from), storage_key, luma_generation_id
+        )
+
+
+def local_image_path(image_id: str) -> Path:
+    with database() as connection:
+        image = next((
+            image for product in products.get_products(connection)
+            for image in product["images"] if image["id"] == image_id
+        ), None)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Generated image not found.")
+    root = (data_directory() / "images").resolve()
+    key = Path(image["storage_key"])
+    path = (root / key).resolve()
+    if key.is_absolute() or not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="Generated image file is unavailable.")
+    if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}:
+        raise HTTPException(status_code=404, detail="Generated image format is unavailable.")
+    return path

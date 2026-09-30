@@ -6,3 +6,41 @@
 .upload-success strong,.upload-success span:not(.success-icon){display:block}
 .upload-success strong{font-size:13px}
 .upload-success span:not(.success-icon){font-size:11px;margin-top:3px;color:#567963}
+
+/* Catalog persistence and review */
+.review-table { margin-top: 22px; }
+.confirmation-bar { display: flex; align-items: center; gap: 14px; margin-top: 18px; padding: 20px; border: 1px solid #ccd9ca; background: #eef3e9; }
+.confirmation-bar > div { flex: 1; }
+.confirmation-bar strong { font-size: 13px; }
+.confirmation-bar p { margin: 6px 0 0; font-size: 12px; color: #617564; line-height: 1.5; }
+.confirmation-bar button { white-space: nowrap; }
+.secondary-button { border: 1px solid #b6c5b5; color: #38513f; background: transparent; padding: 12px 15px; font: inherit; font-size: 12px; cursor: pointer; }
+.secondary-button:disabled { opacity: .5; cursor: wait; }
+.product-table td { vertical-align: top; }
+.product-table td:first-child { width: 28%; }
+.product-table td:last-child { width: 23%; }
+.product-table { min-width: 760px; }
+.product-details { margin-top: 12px; font-size: 11px; max-width: 280px; }
+.product-details summary { cursor: pointer; color: #3d6647; }
+.product-details dl, .field-changes { margin: 10px 0 0; }
+.product-details dl > div, .field-changes > div { margin-bottom: 10px; }
+.product-details dt, .field-changes dt { color: #56705c; font-size: 10px; font-weight: 700; margin-bottom: 3px; }
+.product-details dd, .field-changes dd { margin: 0; line-height: 1.6; overflow-wrap: anywhere; }
+.field-changes { min-width: 160px; font-size: 11px; }
+.field-changes strong { color: #734b20; font-weight: 500; }
+.previous-value { color: #687869; text-decoration: line-through; }
+.change-new { color: #2e6b3a; background: #e8f2e6; }
+.change-changed { color: #8b592e; background: #fff0e3; }
+.change-unchanged { color: #667368; background: #f0f3ed; }
+.change-invalid { color: #993f32; background: #fce8e2; }
+.muted { color: #7c8d80; }
+.row-issues { font-size: 11px; line-height: 1.6; color: #985d37; }
+.generated-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.generated-images img { width: 66px; height: 66px; object-fit: contain; background: #f2f4ef; }
+.generated-images small { flex-basis: 100%; color: #7a8b7e; }
+button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px solid #a47844; outline-offset: 4px; }
+@media(max-width: 850px) {
+  .confirmation-bar { flex-wrap: wrap; }
+  .confirmation-bar > div { flex-basis: 100%; }
+  .catalog-title { gap: 16px; }
+}

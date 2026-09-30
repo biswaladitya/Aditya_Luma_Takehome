@@ -6,10 +6,10 @@ from litestar import Litestar
 from litestar.config.cors import CORSConfig
 from litestar.static_files import create_static_files_router
 
-from backend.api.routes.catalog import preview_catalog
+from backend.api.routes.catalog import catalog_routes
 
 frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
-routes = [preview_catalog]
+routes = list(catalog_routes)
 if frontend_dist.is_dir():
     routes.append(
         create_static_files_router(
