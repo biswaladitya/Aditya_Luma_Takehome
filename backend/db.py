@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 def _absolute_path(value: str) -> Path:
@@ -67,6 +67,32 @@ _REVIEW_SCHEMA = (
         END""",
 )
 
+# Drive delivery of approved images; review state is never changed by it. See google_drive_writeback.md.
+_DELIVERY_SCHEMA = (
+    """CREATE TABLE drive_deliveries (
+        image_id TEXT PRIMARY KEY NOT NULL REFERENCES generated_images(id) ON DELETE RESTRICT,
+        product_sku TEXT NOT NULL REFERENCES products(sku) ON DELETE RESTRICT,
+        state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'delivered')),
+        filename TEXT NOT NULL CHECK (length(filename) > 0),
+        drive_file_id TEXT,
+        drive_url TEXT,
+        delivered_at TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (state = 'pending' OR (drive_file_id IS NOT NULL
+            AND drive_url IS NOT NULL AND delivered_at IS NOT NULL))
+    )""",
+    "CREATE INDEX drive_deliveries_product_sku ON drive_deliveries(product_sku)",
+    """CREATE TRIGGER drive_deliveries_forward_only
+        BEFORE UPDATE OF state ON drive_deliveries
+        WHEN NEW.state IS NOT OLD.state
+            AND NOT (OLD.state = 'pending' AND NEW.state = 'delivered')
+        BEGIN
+            SELECT RAISE(ABORT, 'delivery state can only move forward');
+        END""",
+)
+
 _SCHEMA = (
     """CREATE TABLE products (
         sku TEXT PRIMARY KEY NOT NULL CHECK (length(trim(sku)) > 0),
@@ -112,7 +138,7 @@ _SCHEMA = (
         CHECK ((status = 'pending' AND applied_at IS NULL AND result IS NULL)
             OR (status = 'applied' AND applied_at IS NOT NULL AND result IS NOT NULL))
     )""",
-) + _REVIEW_SCHEMA
+) + _REVIEW_SCHEMA + _DELIVERY_SCHEMA
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
@@ -142,6 +168,24 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         for statement in _REVIEW_SCHEMA:
             connection.execute(statement)
         version = 3
+    if version == 3:
+        # v3 -> v4: Drive delivery state; nothing has been delivered yet.
+        for statement in _DELIVERY_SCHEMA:
+            connection.execute(statement)
+        version = 4
+    if version == 4:
+        # v4 -> v5: files go to the signed-in user's My Drive root, so drop drive_folder_id.
+        # SQLite cannot drop a column named in a CHECK, so rebuild the table and keep its rows.
+        connection.execute("DROP TRIGGER drive_deliveries_forward_only")
+        connection.execute("DROP INDEX drive_deliveries_product_sku")
+        connection.execute("ALTER TABLE drive_deliveries RENAME TO drive_deliveries_v4")
+        for statement in _DELIVERY_SCHEMA:
+            connection.execute(statement)
+        columns = ("image_id, product_sku, state, filename, drive_file_id, drive_url, "
+                   "delivered_at, error, created_at, updated_at")
+        connection.execute(f"INSERT INTO drive_deliveries ({columns}) SELECT {columns} FROM drive_deliveries_v4")
+        connection.execute("DROP TABLE drive_deliveries_v4")
+        version = 5
     if version != SCHEMA_VERSION:
         raise RuntimeError(f"Unsupported catalog schema version: {version}")
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

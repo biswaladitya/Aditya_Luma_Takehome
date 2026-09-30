@@ -23,6 +23,7 @@ def _image(row: sqlite3.Row) -> dict:
     image = dict(row)
     image["generated_from"] = json.loads(image["generated_from"])
     image["review"] = None  # Filled from image_reviews by get_products.
+    image["delivery"] = None  # Filled from drive_deliveries by get_products.
     return image
 
 
@@ -63,6 +64,14 @@ def get_products(connection: sqlite3.Connection, skus: list[str] | None = None) 
         for row in reviews:
             by_id[row["image_id"]]["review"] = {
                 key: row[key] for key in ("state", "send_error", "approved_by", "approved_at")
+            }
+        deliveries = connection.execute(
+            "SELECT image_id, state, filename, drive_url, delivered_at, error FROM drive_deliveries "
+            f"WHERE product_sku IN ({placeholders})", batch
+        )
+        for row in deliveries:
+            by_id[row["image_id"]]["delivery"] = {
+                key: row[key] for key in ("state", "filename", "drive_url", "delivered_at", "error")
             }
     return list(products.values())
 

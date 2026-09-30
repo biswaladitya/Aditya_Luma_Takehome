@@ -4,6 +4,8 @@ export type FieldChanges = Record<string, { before: string | null; after: string
 export type ReviewState = 'pending_send' | 'awaiting_approval' | 'approved'
 export type ImageReview = { state: ReviewState; send_error: string | null; approved_by: string | null; approved_at: string | null }
 
+export type DeliveryState = 'pending' | 'delivered'
+
 export type GeneratedImage = {
   id: string
   image_url?: string
@@ -38,6 +40,10 @@ export type CatalogRow = {
   approved_image_id: string | null
   send_error: string | null
   can_send: boolean
+  delivery_status: DeliveryState | null
+  delivery_error: string | null
+  drive_url: string | null
+  can_deliver: boolean
 }
 
 export type Catalog = {
@@ -97,6 +103,18 @@ export function sendForReview(skus: string[]): Promise<ReviewResult> {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skus }),
   })
 }
+
+export type DeliveryResult = { queued: string[]; skipped: { sku: string; reason: string }[] }
+
+/** Saves approved images to the signed-in user's Google Drive. Only this explicit request writes anything. */
+export function deliverToDrive(skus: string[], accessToken: string): Promise<DeliveryResult> {
+  return catalogRequest('/api/deliveries', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skus, access_token: accessToken }),
+  })
+}
+
+/** Rows with a Drive write in flight; a pending row with an error is waiting for a retry instead. */
+export const isDelivering = (row: CatalogRow) => row.delivery_status === 'pending' && !row.delivery_error
 
 /** Rows whose Slack state can still change without user action (a send or Ellie's decision). */
 export const isInReview = (row: CatalogRow) => row.review_status === 'pending_send' && !row.send_error || row.review_status === 'awaiting_approval'

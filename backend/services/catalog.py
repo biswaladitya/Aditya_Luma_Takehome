@@ -134,6 +134,7 @@ def product_view(row: dict) -> dict:
         status = "never_generated"
     result["generation_status"] = status
     result.update(review_summary(done, row))
+    result.update(delivery_summary(done))
     return result
 
 
@@ -155,6 +156,21 @@ def review_summary(done: list[dict], row: dict) -> dict:
         "send_error": next((r["send_error"] for r in reviews if r["send_error"]), None),
         "reviewable_image_ids": [] if approved else reviewable,
         "can_send": bool(reviewable) and not approved,
+    }
+
+
+def delivery_summary(done: list[dict]) -> dict:
+    """Derive Drive delivery state for the approved image; nothing is stored on the product."""
+    approved = next((image for image in done if (image["review"] or {}).get("state") == "approved"), None)
+    delivery = (approved or {}).get("delivery")
+    status = delivery["state"] if delivery else None
+    error = delivery["error"] if delivery else None
+    return {
+        "delivery_status": status,
+        "delivery_error": error,
+        "drive_url": delivery["drive_url"] if delivery else None,
+        # A pending row without an error is in flight; one with an error is waiting for a retry.
+        "can_deliver": bool(approved) and (status is None or (status == "pending" and bool(error))),
     }
 
 

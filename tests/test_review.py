@@ -11,7 +11,7 @@ from unittest.mock import patch
 from litestar.testing import TestClient
 
 from backend.app import app
-from backend.db import database
+from backend.db import SCHEMA_VERSION, database
 from backend.services.review import handle_block_action
 from tests.test_catalog_imports import csv_bytes, product
 
@@ -188,11 +188,13 @@ class ReviewTests(unittest.TestCase):
 
     def test_upgrade_from_v2_adds_review_table(self):
         with database() as connection:
+            connection.execute("DROP TABLE drive_deliveries")
             connection.execute("DROP TABLE image_reviews")
             connection.execute("PRAGMA user_version = 2")
-        with database() as connection:
+        with database() as connection:  # Passes through every later step too.
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM image_reviews").fetchone()[0], 0)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM drive_deliveries").fetchone()[0], 0)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

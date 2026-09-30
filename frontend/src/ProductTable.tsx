@@ -33,9 +33,16 @@ function Changes({ changes }: { changes: FieldChanges }) {
 
 export type SlackSend = { send: (sku: string) => void; disabled: boolean }
 
+export type DriveWrite = { deliver: (sku: string) => void; disabled: boolean }
+
+function deliveryLabel(row: CatalogRow) {
+  if (row.delivery_status === 'delivered') return 'Saved to Drive'
+  return row.delivery_error ? 'Save failed' : 'Saving to Drive'
+}
+
 export type Selection = { selected: Set<string>; toggle: (sku: string) => void; disabled: boolean }
 
-export default function ProductTable({ rows, preview = false, selection, slack, perRequest = 2 }: { rows: CatalogRow[]; preview?: boolean; selection?: Selection; slack?: SlackSend; perRequest?: number }) {
+export default function ProductTable({ rows, preview = false, selection, slack, drive, perRequest = 2 }: { rows: CatalogRow[]; preview?: boolean; selection?: Selection; slack?: SlackSend; drive?: DriveWrite; perRequest?: number }) {
   if (!rows.length) return <div className="empty-state">No products to show.</div>
   return <div className="table-wrap"><table className="product-table">
     <thead><tr>{selection && <th aria-label="Select" />}<th>PRODUCT</th><th>SHOT IDEA</th>{preview && <th>CATALOG CHANGES</th>}<th>IMAGE STATUS</th></tr></thead>
@@ -65,6 +72,10 @@ export default function ProductTable({ rows, preview = false, selection, slack, 
         {row.review_status && <p><span className={`status review-${row.review_status}`}>{reviewLabels[row.review_status]}</span></p>}
         {row.send_error && <p className="row-issues">Slack: {row.send_error}</p>}
         {slack && row.can_send && <button className="secondary-button" disabled={slack.disabled} onClick={() => slack.send(row.sku)}>{row.send_error ? 'Retry send to Slack' : 'Send to Slack'}</button>}
+        {row.delivery_status && <p><span className={`status delivery-${row.delivery_error ? 'failed' : row.delivery_status}`}>{deliveryLabel(row)}</span></p>}
+        {row.drive_url && <p><a href={row.drive_url} target="_blank" rel="noreferrer">Open in Drive ↗</a></p>}
+        {row.delivery_error && <p className="row-issues">Drive: {row.delivery_error}</p>}
+        {drive && row.can_deliver && <button className="secondary-button" disabled={drive.disabled} onClick={() => drive.deliver(row.sku)}>{row.delivery_error ? 'Retry save to Drive' : 'Save to Drive'}</button>}
         {row.images.some(i => i.status === 'failed') && <p className="row-issues">{row.images.filter(i => i.status === 'failed').length} failed: {row.images.find(i => i.status === 'failed')?.error}</p>}
         {row.images.some(i => i.status === 'done') && <div className="generated-images">{row.images.filter(i => i.status === 'done' && i.image_url).map(image => <figure key={image.id} className={`generated-image ${image.review?.state === 'approved' ? 'approved' : ''}`}><a href={image.image_url} target="_blank" rel="noreferrer"><img src={image.image_url} alt={`Generated image v${image.version} for ${row.product_name}`} loading="lazy" /></a><figcaption>{imageLabel(image, row)}</figcaption></figure>)}<small>{row.images.filter(i => i.status === 'done').length} saved images</small></div>}
       </td>

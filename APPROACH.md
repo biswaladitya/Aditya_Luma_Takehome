@@ -68,3 +68,24 @@ Here's my two cents:
 - i'll probably start by focusing on problem 2. solving problem 1 is a bit harder without making Ellie & all other creators actually add in their two cents through the platform too? if they were capable of doing that, they'd just do it in google sheets, so the real bottle-neck is the personal side of the operational workflow
 
 
+## Delivery to Google Drive
+
+Delivery is the last step of the current MVP (details in `google_drive_writeback.md`).
+Once Ellie has approved an image in Slack, she clicks **Save to Drive** on the product, or
+**Save all approved to Drive**. Approval alone never writes anything.
+
+- **Whose Drive:** the click opens Google's sign-in popup; files go to the top level of the
+  signed-in user's My Drive as `<SKU>_styled_01.<ext>`. Which Drive to write to is the
+  user's choice, not a credential the app owns.
+- **No stored credentials:** the browser gets a one-hour access token (Google Identity
+  Services) and sends it with the save request; the backend uses it for that batch and
+  discards it. Later clicks in the same tab reuse it, and after it expires Google normally
+  re-issues it without asking again. The `drive.file` scope means the app only sees files
+  it created. The backend uses the Drive v3 REST API through the standard library.
+- **Safe retries:** delivery state lives in its own `drive_deliveries` table and never touches
+  the review decision. An existing file with the target name is overwritten in place, so a
+  retry after a crash or a database reset replaces the file instead of adding a copy. Every failure is shown on the product row and
+  retried by clicking again; one failing product does not block the rest of a batch.
+- **Out of scope:** product-page publishing, and more than one approved image per product
+  (the `_01` suffix leaves room for the customer's 2–3 images later).
+

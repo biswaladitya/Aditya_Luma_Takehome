@@ -63,3 +63,6 @@ button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px soli
 .generated-image.approved figcaption { color: #2e6b3a; font-weight: 700; }
 .review-awaiting_approval, .review-pending_send { background: #fff0e3; color: #9d592c; }
 .review-approved { background: #e8f2e6; color: #2e6b3a; }
+.delivery-pending { background: #fff0e3; color: #9d592c; }
+.delivery-delivered { background: #e8f2e6; color: #2e6b3a; }
+.delivery-failed { background: #fff2ee; color: #9c3b2e; }

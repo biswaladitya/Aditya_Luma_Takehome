@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react'
 import GenerationProgress from './GenerationProgress'
-import { batchProgress, canSelect, catalogRequest, confirmCatalogUpdate, generateImages, isGenerating, isInReview, sendForReview, uploadCatalogPreview, type Catalog, type CatalogPreview } from './catalogApi'
+import { batchProgress, canSelect, catalogRequest, confirmCatalogUpdate, deliverToDrive, generateImages, isDelivering, isGenerating, isInReview, sendForReview, uploadCatalogPreview, type Catalog, type CatalogPreview } from './catalogApi'
 import ProductTable from './ProductTable'
+import { clearDriveToken, getDriveToken, prepareGoogleSignIn } from './googleAuth'
 
 const PENDING_IMPORT_KEY = 'luma.pendingImport'
 
@@ -27,22 +28,26 @@ export default function App() {
   const [batchSkus, setBatchSkus] = useState<string[]>([])
   const [sendingToSlack, setSendingToSlack] = useState(false)
   const [slackMessage, setSlackMessage] = useState('')
+  const [writingToDrive, setWritingToDrive] = useState(false)
+  const [driveMessage, setDriveMessage] = useState('')
   const anyGenerating = Boolean(catalog?.rows.some(isGenerating))
   const anyInReview = Boolean(catalog?.rows.some(isInReview))
+  const anyDelivering = Boolean(catalog?.rows.some(isDelivering))
   const sendable = catalog ? catalog.rows.filter(row => row.can_send) : []
+  const deliverable = catalog ? catalog.rows.filter(row => row.can_deliver) : []
   const perRequest = catalog?.generation_config.images_per_request ?? 2
   // Track the SKUs of the running request; after a reload, fall back to whatever is generating.
   const batchRows = catalog ? catalog.rows.filter(row => batchSkus.includes(row.sku) || isGenerating(row)) : []
   const progress = batchProgress(batchRows, perRequest)
 
-  // Refresh while Luma jobs run or Slack is pending, so thumbnails, failures and Ellie's decision appear without a reload.
+  // Refresh while Luma jobs run, Slack is pending or Drive writes are in flight, so results appear without a reload.
   useEffect(() => {
-    if (!anyGenerating && !anyInReview) return
+    if (!anyGenerating && !anyInReview && !anyDelivering) return
     const timer = setInterval(() => {
       catalogRequest<Catalog>('/api/catalog').then(setCatalog).catch(() => { /* Retry on the next tick. */ })
     }, 3000)
     return () => clearInterval(timer)
-  }, [anyGenerating, anyInReview])
+  }, [anyGenerating, anyInReview, anyDelivering])
 
   // Drop selections that stopped being eligible after a reload or a finished job.
   useEffect(() => {
@@ -87,6 +92,33 @@ export default function App() {
       setSlackMessage(cause instanceof Error ? cause.message : 'Could not send to Slack.')
     } finally {
       setSendingToSlack(false)
+    }
+  }
+
+  // Load Google sign-in early so a Save to Drive click can open its popup without being blocked.
+  useEffect(() => { prepareGoogleSignIn().catch(() => { /* The click reports what is missing. */ }) }, [])
+
+  async function writeToDrive(skus: string[], confirmText?: string) {
+    if (!skus.length || writingToDrive) return
+    setDriveMessage('')
+    let token: string
+    try {
+      token = await getDriveToken()  // Must start inside the click; the popup is only shown when needed.
+    } catch (cause) {
+      setDriveMessage(cause instanceof Error ? cause.message : 'Google sign-in failed.')
+      return
+    }
+    if (confirmText && !window.confirm(confirmText)) return
+    setWritingToDrive(true)
+    try {
+      const result = await deliverToDrive(skus, token)
+      if (result.skipped.length) setDriveMessage(`Skipped ${result.skipped.length}: ${result.skipped.map(item => `${item.sku} (${item.reason})`).join(', ')}`)
+      setCatalog(await catalogRequest<Catalog>('/api/catalog'))
+    } catch (cause) {
+      clearDriveToken()  // An expired or revoked token signs in again on the next click.
+      setDriveMessage(cause instanceof Error ? cause.message : 'Could not save to Drive.')
+    } finally {
+      setWritingToDrive(false)
     }
   }
 
@@ -232,7 +264,7 @@ export default function App() {
               <div className="summary-card"><span>NO SHOT IDEA</span><strong>{catalog.without_shot_idea}</strong><small>Products without a requested scene</small></div>
               <div className="summary-card"><span>NEEDS INPUT</span><strong>{catalog.generation_summary.missing_input}</strong><small>Missing details for generation</small></div>
             </div>
-            <div className="review-table"><ProductTable rows={catalog.rows} selection={{ selected, toggle, disabled: generating }} slack={{ send: sku => void sendToSlack([sku]), disabled: sendingToSlack }} perRequest={perRequest} /></div>
+            <div className="review-table"><ProductTable rows={catalog.rows} selection={{ selected, toggle, disabled: generating }} slack={{ send: sku => void sendToSlack([sku]), disabled: sendingToSlack }} drive={{ deliver: sku => void writeToDrive([sku]), disabled: writingToDrive }} perRequest={perRequest} /></div>
             {generationMessage && <div className="error" role="alert">{generationMessage}</div>}
             {progress.total > 0 && <div className="batch-progress">
               <GenerationProgress label={progress.active ? 'Generating images' : 'Generation finished'} progress={progress} />
@@ -247,6 +279,11 @@ export default function App() {
             <div className="confirmation-bar generate-bar">
               <div><strong>{sendable.length} ready for Slack</strong><p>{sendable.length ? 'Posts each product’s candidates to its own Slack thread. Only Ellie’s Approve there decides.' : 'Generated images appear here once they can be sent. Nothing is posted until you click.'}</p></div>
               <button className="primary-button" disabled={!sendable.length || sendingToSlack} onClick={() => { if (window.confirm(`Send ${sendable.length} product${sendable.length === 1 ? '' : 's'} to Slack for review?`)) void sendToSlack(sendable.map(row => row.sku)) }}>{sendingToSlack ? 'Sending…' : 'Send all to Slack'}</button>
+            </div>
+            {driveMessage && <div className="error" role="alert">{driveMessage}</div>}
+            <div className="confirmation-bar generate-bar">
+              <div><strong>{deliverable.length} approved for Drive</strong><p>{deliverable.length ? 'Asks you to sign in with Google, then saves each approved image to the top of your My Drive as SKU_styled_01.' : 'Images Ellie approves in Slack appear here. Nothing is saved to Drive until you click.'}</p></div>
+              <button className="primary-button" disabled={!deliverable.length || writingToDrive} onClick={() => void writeToDrive(deliverable.map(row => row.sku), `Save ${deliverable.length} approved image${deliverable.length === 1 ? '' : 's'} to your Google Drive?`)}>{writingToDrive ? 'Saving…' : 'Save all approved to Drive'}</button>
             </div>
           </> : <div className="empty-state">Upload and confirm a CSV to create your saved catalog.</div>}
         </section>
