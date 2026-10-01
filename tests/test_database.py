@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from backend.db import PROJECT_ROOT, SCHEMA_VERSION, data_directory, database, database_path
 from backend.repositories.products import (
+    BRIEF_ATTRIBUTES,
     PRODUCT_ATTRIBUTES,
     create_pending_import,
     get_pending_import,
@@ -93,6 +94,19 @@ class DatabaseTests(unittest.TestCase):
                 self.assertEqual(updated["version"], version)
                 self.assertEqual(updated["created_at"], original["created_at"])
                 self.assertEqual(save_product(connection, attributes), updated)
+
+    def test_brief_version_bumps_only_when_a_brief_field_changes(self):
+        attributes = product()
+        with database() as connection:
+            self.assertEqual(save_product(connection, attributes)["brief_version"], 1)
+            for key in PRODUCT_ATTRIBUTES[1:]:
+                attributes[key] += " changed"
+                saved = save_product(connection, attributes)
+                expected = 1 + sum(k in BRIEF_ATTRIBUTES for k in PRODUCT_ATTRIBUTES[1:PRODUCT_ATTRIBUTES.index(key) + 1])
+                self.assertEqual(saved["brief_version"], expected, key)
+            self.assertEqual((saved["version"], saved["brief_version"]), (9, 6))
+            image = save_generated_image(connection, "VASE-001", attributes, "one.png")
+            self.assertEqual(image["brief_version"], 6)
 
     def test_images_keep_submitted_snapshots_and_survive_catalog_changes(self):
         submitted = product()

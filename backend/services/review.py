@@ -1,7 +1,9 @@
-"""Explicit Slack review: send candidates to a product thread and record Ellie's approval."""
+"""Slack review: post candidates to a product thread and record Ellie's approval.
+
+Generation posts its candidates itself (generation.py); /api/reviews only retries failed posts.
+"""
 
 import logging
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -14,29 +16,20 @@ from backend.services.catalog import product_view
 
 logger = logging.getLogger(__name__)
 APPROVE_ACTION = "approve_image"
+OUTDATED = "Outdated: brief changed"
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack")
-_sending: set[str] = set()
-_sending_lock = threading.Lock()
 
 
-def _claim(sku: str) -> bool:
-    with _sending_lock:
-        if sku in _sending:
-            return False
-        _sending.add(sku)
-        return True
-
-
-def review_blocks(product: dict, version: int, image_id: str, footer: str | None = None) -> list:
+def review_blocks(brief: dict, version: int, image_id: str, footer: str | None = None) -> list:
     """Message blocks for one candidate; the image itself is the message posted just above.
 
-    Without a footer they carry the Approve button.
+    `brief` is what the image was made from. Without a footer they carry the Approve button.
     """
-    name = product["product_name"] or product["sku"]
+    name = brief["product_name"] or brief["sku"]
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn",
-            "text": f"*{name}* · `{product['sku']}` · candidate v{version} (image above)\n_{product['shot_idea']}_"}},
+            "text": f"*{name}* · `{brief['sku']}` · candidate v{version} (image above)\n_{brief['shot_idea']}_"}},
     ]
     if footer:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
@@ -46,7 +39,7 @@ def review_blocks(product: dict, version: int, image_id: str, footer: str | None
             "text": {"type": "plain_text", "text": "Approve"},
             "confirm": {
                 "title": {"type": "plain_text", "text": "Approve this image?"},
-                "text": {"type": "mrkdwn", "text": "Only one image can be approved for this product, and it cannot be undone."},
+                "text": {"type": "mrkdwn", "text": "Only one image can be approved for this brief, and it cannot be undone."},
                 "confirm": {"type": "plain_text", "text": "Approve"},
                 "deny": {"type": "plain_text", "text": "Cancel"},
             },
@@ -54,15 +47,19 @@ def review_blocks(product: dict, version: int, image_id: str, footer: str | None
     return blocks
 
 
+def _brief(product: dict, image: dict) -> dict:
+    return {**product, **image["generated_from"]}
+
+
 def start_review(skus: list[str]) -> dict:
-    """Queue eligible products for posting to Slack. Only this explicit request sends anything."""
+    """Retry posting: post a product's current-brief candidates that never reached Slack."""
     if not skus:
         raise HTTPException(status_code=400, detail="Select at least one product.")
     try:
         slack.require("SLACK_BOT_TOKEN"), slack.require("SLACK_CHANNEL_ID")
     except slack.SlackError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    queued, skipped = [], []
+    queued, skipped, jobs = [], [], []
     with database() as connection:
         found = {row["sku"]: product_view(row) for row in products.get_products(connection, skus)}
         for sku in dict.fromkeys(skus):
@@ -71,45 +68,44 @@ def start_review(skus: list[str]) -> dict:
                 skipped.append({"sku": sku, "reason": "Unknown SKU."})
             elif row["review_status"] == "approved":
                 skipped.append({"sku": sku, "reason": "An image is already approved."})
+            elif row["generating"]:
+                skipped.append({"sku": sku, "reason": "Already generating or posting to Slack."})
             elif not row["can_send"]:
-                skipped.append({"sku": sku, "reason": "No generated images are ready to send."})
-            elif not _claim(sku):
-                skipped.append({"sku": sku, "reason": "Already sending to Slack."})
+                skipped.append({"sku": sku, "reason": "No candidates are waiting to be posted."})
             else:
-                reviews.queue_for_send(connection, sku, row["reviewable_image_ids"])
+                # Posting is the last step of a candidate's generation, so it is processing again until posted.
+                for image_id in row["reviewable_image_ids"]:
+                    products.update_generated_image(connection, image_id, status="processing", post_error=None)
+                jobs.append((sku, row["reviewable_image_ids"]))
                 queued.append(sku)
-    for sku in queued:  # Submit only after the pending rows are committed.
-        _executor.submit(_deliver, sku)
+    for job in jobs:  # Submit only after the processing marks are committed.
+        _executor.submit(post_candidates, *job)
     return {"queued": queued, "skipped": skipped}
 
 
-def _deliver(sku: str) -> None:
-    """Post the parent message and each pending candidate, recording each step as it lands."""
+def post_candidates(sku: str, image_ids: list[str]) -> None:
+    """Post the parent message (once per product) and each candidate. Each candidate becomes done:
+    posted with a review row waiting on Ellie, or with a post_error that Retry posting clears."""
+    def failed(ids: list[str], error: str) -> None:
+        with database() as connection:
+            for image_id in ids:
+                products.update_generated_image(connection, image_id, status="done", post_error=error[:500])
+
     try:
         with database() as connection:
             product = products.get_products(connection, [sku])[0]
-            pending = [r for r in reviews.reviews_for_sku(connection, sku) if r["state"] == "pending_send"]
             thread = reviews.thread_for_sku(connection, sku)
-        if not pending:
-            return
-        ids = [r["image_id"] for r in pending]
         images = {image["id"]: image for image in product["images"]}
         name = product["product_name"] or sku
         try:
             client = slack.client()
             channel = thread[0] if thread else slack.require("SLACK_CHANNEL_ID")
-            if thread:
-                thread_ts = thread[1]
-            else:
-                thread_ts = client.post_message(
-                    channel, f"{name} ({sku}) — shot idea: {product['shot_idea']}. Review the candidates below.")
-                with database() as connection:
-                    reviews.set_thread(connection, sku, channel, thread_ts)
-        except Exception as exc:  # Nothing was posted for these images; they stay pending and retryable.
-            with database() as connection:
-                reviews.mark_send_error(connection, ids, str(exc)[:500])
+            thread_ts = thread[1] if thread else client.post_message(
+                channel, f"{name} ({sku}) — shot idea: {product['shot_idea']}. Review the candidates below.")
+        except Exception as exc:  # Nothing was posted for these images; they can be retried.
+            failed(image_ids, str(exc))
             return
-        for image_id in ids:
+        for image_id in image_ids:
             image = images[image_id]
             try:
                 path = data_directory() / "images" / image["storage_key"]
@@ -118,28 +114,50 @@ def _deliver(sku: str) -> None:
                 file_id = client.upload_image(Path(path), f"{name} v{image['version']}", channel, thread_ts)
                 message_ts = client.post_message(
                     channel, f"{name} candidate v{image['version']}",
-                    blocks=review_blocks(product, image["version"], image_id), thread_ts=thread_ts)
+                    blocks=review_blocks(_brief(product, image), image["version"], image_id), thread_ts=thread_ts)
                 with database() as connection:
-                    reviews.mark_sent(connection, image_id, message_ts, file_id)
+                    reviews.record_post(connection, image_id, channel, thread_ts, message_ts, file_id)
+                    products.update_generated_image(connection, image_id, status="done", post_error=None)
             except Exception as exc:
-                with database() as connection:
-                    reviews.mark_send_error(connection, [image_id], str(exc)[:500])
+                failed([image_id], str(exc))
     except Exception:
-        logger.exception("Slack delivery crashed for %s", sku)
+        logger.exception("Posting to Slack crashed for %s", sku)
         with database() as connection:
-            reviews.fail_unsent(connection, "Sending to Slack failed unexpectedly. Try again.")
-    finally:
-        with _sending_lock:
-            _sending.discard(sku)
+            unfinished = [image["id"] for image in products.get_products(connection, [sku])[0]["images"]
+                          if image["id"] in image_ids and image["status"] == "processing"]
+        failed(unfinished, "Posting to Slack failed unexpectedly. Retry posting.")
 
 
-def recover_unsent() -> None:
-    with database() as connection:
-        reviews.fail_unsent(connection, "Interrupted by a server restart. Send again.")
+def mark_outdated(items: list[dict]) -> None:
+    """After a brief change, replace the Approve button on waiting candidates in the background.
+
+    Best effort: failures are logged and never undo the import; Approve on them is refused regardless.
+    """
+    if items:
+        _executor.submit(_mark_outdated, items)
+
+
+def _mark_outdated(items: list[dict]) -> None:
+    try:
+        client = slack.client()
+        with database() as connection:
+            catalog = {row["sku"]: row for row in products.get_products(connection, list({i["product_sku"] for i in items}))}
+    except Exception:
+        logger.exception("Could not mark outdated Slack messages")
+        return
+    for item in items:
+        product = catalog[item["product_sku"]]
+        image = next(image for image in product["images"] if image["id"] == item["image_id"])
+        try:
+            client.update_message(item["slack_channel"], item["slack_message_ts"], OUTDATED,
+                                  review_blocks(_brief(product, image), image["version"], image["id"], OUTDATED))
+        except Exception:
+            logger.exception("Could not mark Slack message for %s outdated", item["image_id"])
 
 
 def handle_block_action(payload: dict, client=None) -> str | None:
-    """Apply an Approve click. Only the configured approver may decide; the first approval is final."""
+    """Apply an Approve click. Only the configured approver may decide, only on an image made from the
+    product's current brief, and only while that brief has no approval."""
     action = (payload.get("actions") or [{}])[0]
     if action.get("action_id") != APPROVE_ACTION:
         return None
@@ -153,26 +171,27 @@ def handle_block_action(payload: dict, client=None) -> str | None:
     with database() as connection:
         outcome = reviews.approve(connection, image_id, user)
         review = reviews.get_review(connection, image_id)
-        siblings = reviews.reviews_for_sku(connection, review["product_sku"]) if review else []
+        siblings = [item for item in reviews.reviews_for_sku(connection, review["product_sku"])
+                    if item["brief_version"] == review["brief_version"]] if review else []
         product = products.get_products(connection, [review["product_sku"]])[0] if review else None
     messages = {
-        "sibling_approved": "Another image for this product is already approved. Only one can be approved.",
+        "outdated": "This image was made from an older brief, so it can't be approved. New images can be generated in the web app.",
+        "sibling_approved": "Another image for this brief is already approved. Only one can be approved.",
         "already_approved": "This image is already approved.",
         "not_awaiting": "This image is not waiting for approval.",
     }
     if outcome in messages:
         client.post_ephemeral(channel, user, messages[outcome])
         return outcome
-    versions = {image["id"]: image["version"] for image in product["images"]}
+    images = {image["id"]: image for image in product["images"]}
     for item in siblings:
-        if item["state"] == "pending_send" or not item["slack_message_ts"]:
-            continue
         footer = (f"✅ Approved by <@{user}>" if item["image_id"] == image_id
                   else "Not selected — another image was approved")
+        image = images[item["image_id"]]
         try:
             client.update_message(
                 item["slack_channel"], item["slack_message_ts"], footer,
-                review_blocks(product, versions[item["image_id"]], item["image_id"], footer))
+                review_blocks(_brief(product, image), image["version"], item["image_id"], footer))
         except Exception:  # The decision is already saved; a stale message is only cosmetic.
             logger.exception("Could not update Slack message for %s", item["image_id"])
     return outcome

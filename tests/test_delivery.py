@@ -15,7 +15,7 @@ from litestar.testing import TestClient
 
 from backend import drive
 from backend.app import app
-from backend.db import SCHEMA_VERSION, data_directory, database
+from backend.db import data_directory, database
 from backend.repositories import deliveries, products, reviews
 from backend.services.delivery import delivery_filename, recover_unfinished
 from tests.test_catalog_imports import csv_bytes, product
@@ -104,8 +104,7 @@ class DeliveryTests(unittest.TestCase):
     def approve(self, sku, content=b"pixels"):
         image_id = self.add_image(sku, f"{sku.lower()}.png", content)
         with database() as connection:
-            reviews.queue_for_send(connection, sku, [image_id])
-            reviews.mark_sent(connection, image_id, "100.1", "F0")
+            reviews.record_post(connection, image_id, "C1", "100.0", "100.1", "F0")
             self.assertEqual(reviews.approve(connection, image_id, "UELLIE"), "approved")
         return image_id
 
@@ -147,7 +146,7 @@ class DeliveryTests(unittest.TestCase):
         row = self.row()
         self.assertEqual(row["delivery_status"], "delivered", row["delivery_error"])
         (file_id, stored), = self.drive.files.items()
-        self.assertEqual((stored["name"], stored["mime"], stored["content"]), ("VASE-042_styled_01.png", "image/png", b"VASE-042 pixels"))
+        self.assertEqual((stored["name"], stored["mime"], stored["content"]), ("VASE-042_styled_v1.png", "image/png", b"VASE-042 pixels"))
         self.assertEqual(row["drive_url"], f"https://drive.google.com/file/d/{file_id}/view")
         self.assertEqual(set(self.drive.tokens), {TOKEN})
         self.assertFalse(row["can_deliver"])
@@ -160,9 +159,9 @@ class DeliveryTests(unittest.TestCase):
             dump = "\n".join(connection.iterdump())
         self.assertNotIn(TOKEN, dump)
 
-    def test_filename_uses_uppercased_sku_and_real_extension(self):
-        self.assertEqual(delivery_filename("vase-042", ".PNG"), "VASE-042_styled_01.png")
-        self.assertEqual(delivery_filename("VASE-042", "jpg"), "VASE-042_styled_01.jpg")
+    def test_filename_uses_sku_image_version_and_real_extension(self):
+        self.assertEqual(delivery_filename("VASE-042", 3, ".PNG"), "VASE-042_styled_v3.png")
+        self.assertEqual(delivery_filename("VASE-042", 12, "jpg"), "VASE-042_styled_v12.jpg")
 
     def test_second_click_does_nothing(self):
         self.deliver()
@@ -184,7 +183,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn(file_id, self.row()["drive_url"])
 
     def test_existing_same_named_file_gets_the_new_content(self):
-        file_id = self.drive.add_file("VASE-042_styled_01.png", b"old")
+        file_id = self.drive.add_file("VASE-042_styled_v1.png", b"old")
         self.deliver()
         self.until(self.settled)
         self.assertEqual(self.row()["delivery_status"], "delivered")
@@ -193,12 +192,12 @@ class DeliveryTests(unittest.TestCase):
 
     def test_two_same_named_files_are_an_error_and_nothing_is_written(self):
         for _ in range(2):
-            self.drive.add_file("VASE-042_styled_01.png", b"old")
+            self.drive.add_file("VASE-042_styled_v1.png", b"old")
         self.deliver()
         self.until(self.settled)
         row = self.row()
         self.assertEqual(row["delivery_status"], "pending")
-        self.assertIn("2 files named VASE-042_styled_01.png", row["delivery_error"])
+        self.assertIn("2 files named VASE-042_styled_v1.png", row["delivery_error"])
         self.assertTrue(row["can_deliver"])
         self.assertEqual((self.drive.uploads, self.drive.overwrites), ([], []))
         self.assertEqual({f["content"] for f in self.drive.files.values()}, {b"old"})
@@ -257,45 +256,6 @@ class DeliveryTests(unittest.TestCase):
         row = self.row()
         self.assertIn("restart", row["delivery_error"])
         self.assertTrue(row["can_deliver"])
-
-    def test_upgrade_from_v3_adds_delivery_table(self):
-        with database() as connection:
-            connection.execute("DROP TABLE drive_deliveries")
-            connection.execute("PRAGMA user_version = 3")
-        with database() as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM drive_deliveries").fetchone()[0], 0)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, 5)
-
-    def test_upgrade_from_v4_drops_the_folder_column_and_keeps_rows(self):
-        image_id = self.approved["VASE-042"]
-        with database() as connection:
-            for statement in ("DROP TABLE drive_deliveries", """CREATE TABLE drive_deliveries (
-                    image_id TEXT PRIMARY KEY NOT NULL REFERENCES generated_images(id) ON DELETE RESTRICT,
-                    product_sku TEXT NOT NULL REFERENCES products(sku) ON DELETE RESTRICT,
-                    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'delivered')),
-                    filename TEXT NOT NULL CHECK (length(filename) > 0),
-                    drive_folder_id TEXT, drive_file_id TEXT, drive_url TEXT, delivered_at TEXT, error TEXT,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    CHECK (state = 'pending' OR (drive_folder_id IS NOT NULL AND drive_file_id IS NOT NULL
-                        AND drive_url IS NOT NULL AND delivered_at IS NOT NULL)))""",
-                    "CREATE INDEX drive_deliveries_product_sku ON drive_deliveries(product_sku)",
-                    """CREATE TRIGGER drive_deliveries_forward_only BEFORE UPDATE OF state ON drive_deliveries
-                    WHEN NEW.state IS NOT OLD.state AND NOT (OLD.state = 'pending' AND NEW.state = 'delivered')
-                    BEGIN SELECT RAISE(ABORT, 'delivery state can only move forward'); END""",
-                    "PRAGMA user_version = 4"):
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO drive_deliveries (image_id, product_sku, filename, error, created_at, updated_at) "
-                "VALUES (?, 'VASE-042', 'VASE-042_styled_01.png', 'old error', 't', 't')", (image_id,))
-        with database() as connection:
-            columns = [row[1] for row in connection.execute("PRAGMA table_info(drive_deliveries)")]
-            self.assertNotIn("drive_folder_id", columns)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
-            self.assertEqual(deliveries.get_delivery(connection, image_id)["error"], "old error")
-            deliveries.mark_delivered(connection, image_id, "F1", "https://drive.google.com/file/d/F1/view")
-            with self.assertRaises(sqlite3.IntegrityError):  # The forward-only trigger was recreated.
-                connection.execute("UPDATE drive_deliveries SET state = 'pending' WHERE image_id = ?", (image_id,))
 
     def test_delivered_requires_drive_fields_and_state_only_moves_forward(self):
         image_id = self.approved["VASE-042"]

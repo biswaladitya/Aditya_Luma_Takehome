@@ -9,6 +9,8 @@ PRODUCT_ATTRIBUTES = (
     "sku", "product_name", "category", "color", "material", "price",
     "photo", "shot_idea", "notes",
 )
+# The brief: what build_prompt sends to Luma. Only these fields raise brief_version.
+BRIEF_ATTRIBUTES = ("photo", "shot_idea", "product_name", "color", "material")
 
 
 def _now() -> str:
@@ -58,13 +60,11 @@ def get_products(connection: sqlite3.Connection, skus: list[str] | None = None) 
             products[row["product_sku"]]["images"].append(_image(row))
         by_id = {image["id"]: image for sku in batch for image in products[sku]["images"]}
         reviews = connection.execute(
-            "SELECT image_id, state, send_error, approved_by, approved_at FROM image_reviews "
+            "SELECT image_id, state, approved_by, approved_at FROM image_reviews "
             f"WHERE product_sku IN ({placeholders})", batch
         )
         for row in reviews:
-            by_id[row["image_id"]]["review"] = {
-                key: row[key] for key in ("state", "send_error", "approved_by", "approved_at")
-            }
+            by_id[row["image_id"]]["review"] = {key: row[key] for key in ("state", "approved_by", "approved_at")}
         deliveries = connection.execute(
             "SELECT image_id, state, filename, drive_url, delivered_at, error FROM drive_deliveries "
             f"WHERE product_sku IN ({placeholders})", batch
@@ -79,6 +79,7 @@ def get_products(connection: sqlite3.Connection, skus: list[str] | None = None) 
 def save_product(connection: sqlite3.Connection, attributes: dict) -> dict:
     """Save exactly nine normalized CSV attributes; only real changes bump version.
 
+    brief_version goes up only when a brief field changes; images made from an older brief are outdated.
     CSV values, including price, are stored as strings. Blank Shot Ideas are valid.
     No fields are normalized here and no image records are replaced.
     """
@@ -92,11 +93,13 @@ def save_product(connection: sqlite3.Connection, attributes: dict) -> dict:
     changed = " OR ".join(
         f"products.{key} IS NOT excluded.{key}" for key in PRODUCT_ATTRIBUTES[1:]
     )
+    brief_changed = " OR ".join(f"products.{key} IS NOT excluded.{key}" for key in BRIEF_ATTRIBUTES)
     connection.execute(
         f"INSERT INTO products ({columns}, version, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) "
         f"ON CONFLICT(sku) DO UPDATE SET {assignments}, "
-        "version = products.version + 1, updated_at = excluded.updated_at "
+        "version = products.version + 1, updated_at = excluded.updated_at, "
+        f"brief_version = products.brief_version + ({brief_changed}) "
         f"WHERE {changed}",
         [attributes[key] for key in PRODUCT_ATTRIBUTES] + [now, now],
     )
@@ -156,18 +159,20 @@ def save_generated_image(
     *,
     version: int = 1,
     status: str = "done",
+    brief_version: int | None = None,
 ) -> dict:
     """Append a reference and the exact submitted snapshot, never current attributes.
 
-    Local storage_key values are relative to data_directory() / 'images'.
-    This function only stores metadata; it does not read or write image files.
+    brief_version defaults to the product's current one. Local storage_key values are relative
+    to data_directory() / 'images'. This function only stores metadata; it does not read or write image files.
     """
     image_id = str(uuid4())
     connection.execute(
-        "INSERT INTO generated_images "
-        "(id, product_sku, generated_from, storage_key, luma_generation_id, generated_at, version, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (image_id, sku, _json(generated_from), storage_key, luma_generation_id, _now(), version, status),
+        "INSERT INTO generated_images (id, product_sku, generated_from, storage_key, luma_generation_id, "
+        "generated_at, version, status, brief_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, coalesce(?, (SELECT brief_version FROM products WHERE sku = ?)))",
+        (image_id, sku, _json(generated_from), storage_key, luma_generation_id, _now(), version, status,
+         brief_version, sku),
     )
     return _image(connection.execute(
         "SELECT * FROM generated_images WHERE id = ?", (image_id,)
@@ -176,7 +181,7 @@ def save_generated_image(
 
 def update_generated_image(connection: sqlite3.Connection, image_id: str, **fields: object) -> None:
     """Update lifecycle fields only; the generated_from snapshot stays immutable."""
-    allowed = {"status", "error", "storage_key", "luma_generation_id"}
+    allowed = {"status", "error", "storage_key", "luma_generation_id", "post_error"}
     if not fields or set(fields) - allowed:
         raise ValueError(f"Updatable fields: {sorted(allowed)}")
     assignments = ", ".join(f"{key} = ?" for key in fields)
@@ -185,9 +190,17 @@ def update_generated_image(connection: sqlite3.Connection, image_id: str, **fiel
     )
 
 
-def fail_unfinished_images(connection: sqlite3.Connection, reason: str) -> int:
-    """Mark jobs left queued/processing by a restart as failed so the UI never spins forever."""
-    return connection.execute(
+def fail_unfinished_images(connection: sqlite3.Connection, reason: str, post_reason: str) -> int:
+    """Settle jobs a restart cut off so the UI never spins forever.
+
+    A candidate Luma already returned (it has a generation ID) was cut off while posting: it becomes
+    done with a post_error, so posting can be retried. Anything else failed.
+    """
+    posted = connection.execute(
+        "UPDATE generated_images SET status = 'done', post_error = ? "
+        "WHERE status = 'processing' AND luma_generation_id IS NOT NULL", (post_reason,)
+    ).rowcount
+    return posted + connection.execute(
         "UPDATE generated_images SET status = 'failed', error = ? "
         "WHERE status IN ('queued', 'processing')", (reason,)
     ).rowcount

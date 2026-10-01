@@ -14,7 +14,7 @@ from litestar.testing import TestClient
 
 from backend.app import app
 from backend.db import database, data_directory
-from backend.repositories.products import get_pending_import, get_products
+from backend.repositories.products import BRIEF_ATTRIBUTES, get_pending_import, get_products
 from backend.services.catalog import ATTRIBUTES, COLUMNS, record_generated_image
 
 
@@ -114,8 +114,10 @@ class CatalogImportTests(unittest.TestCase):
         changed = preview["rows"][0]
         self.assertEqual(set(changed["changes"]), {"shot_idea", "material", "price", "notes"})
         self.assertEqual(changed["changes"]["material"], {"before": "Ceramic", "after": "Porcelain"})
-        self.assertEqual(changed["generation_changes"], changed["changes"])
+        # Price and notes are info-only; only the brief counts against the images.
+        self.assertEqual(set(changed["generation_changes"]), {"shot_idea", "material"})
         self.assertEqual(changed["generation_status"], "changed_since_generation")
+        self.assertEqual(changed["brief_case"], "with_ellie")
         self.assertEqual(self.confirm(preview).status_code, 200)
         rows = {row["sku"]: row for row in self.catalog()["rows"]}
         self.assertEqual(set(rows), {"VASE-001", "ABSENT", "NEW", "BLANK"})
@@ -195,7 +197,7 @@ class CatalogImportTests(unittest.TestCase):
             self.assertEqual(restored.json(), preview)
             self.assertEqual(new_client.post(f"/api/catalog/imports/{preview['preview_id']}/confirm").status_code, 409)
 
-    def test_any_image_matching_reverted_snapshot_counts_as_already_generated(self):
+    def test_reverting_a_brief_is_a_new_brief_version(self):
         first = product()
         self.apply([first])
         record_generated_image(first["sku"], first, "first.png")
@@ -204,11 +206,12 @@ class CatalogImportTests(unittest.TestCase):
         record_generated_image(second["sku"], second, "second.png")
         self.apply([first])
         row = self.catalog()["rows"][0]
-        self.assertEqual(row["generation_status"], "already_generated")
-        self.assertEqual(row["generation_changes"], {})
-        self.assertEqual(len(row["images"]), 2)
-        self.assertEqual(row["version"], 3)
-        self.assertEqual(self.client.get("/api/catalog/generation-candidates").json()["total_rows"], 0)
+        self.assertEqual((row["version"], row["brief_version"]), (3, 3))
+        self.assertEqual([image["brief_version"] for image in row["images"]], [1, 2])
+        self.assertTrue(all(image["outdated"] for image in row["images"]))
+        self.assertEqual(row["generation_status"], "changed_since_generation")
+        self.assertTrue(row["brief_changed"])
+        self.assertEqual(self.client.get("/api/catalog/generation-candidates").json()["total_rows"], 1)
 
     def test_generation_result_records_submitted_snapshot_after_catalog_changes(self):
         original = product()
@@ -219,10 +222,10 @@ class CatalogImportTests(unittest.TestCase):
         row = self.catalog()["rows"][0]
         self.assertEqual(row["images"][0]["generated_from"], product())
         self.assertEqual(row["images"][0]["id"], image["id"])
-        self.assertEqual(row["generation_status"], "changed_since_generation")
-        self.assertEqual(set(row["generation_changes"]), {"notes"})
+        self.assertEqual(row["generation_status"], "already_generated")  # Notes are info-only.
+        self.assertEqual(row["generation_changes"], {})
 
-    def test_every_catalog_attribute_is_compared_with_generation_snapshot(self):
+    def test_only_brief_fields_make_images_outdated(self):
         self.apply([product()])
         record_generated_image("VASE-001", product(), "first.png")
         for key in ATTRIBUTES:
@@ -230,10 +233,25 @@ class CatalogImportTests(unittest.TestCase):
                 continue
             with self.subTest(attribute=key):
                 revised = product(**{key: product()[key] + ("?changed=1" if key == "photo" else " changed")})
-                preview = self.preview([revised])
-                self.assertEqual(preview["rows"][0]["generation_status"], "changed_since_generation")
-                self.assertEqual(set(preview["rows"][0]["generation_changes"]), {key})
-                self.assertEqual(set(preview["rows"][0]["changes"]), {key})
+                row = self.preview([revised])["rows"][0]
+                self.assertEqual(set(row["changes"]), {key})
+                if key in BRIEF_ATTRIBUTES:
+                    self.assertEqual((row["generation_status"], row["brief_case"]), ("changed_since_generation", "with_ellie"))
+                    self.assertEqual(set(row["generation_changes"]), {key})
+                    self.assertTrue(row["images"][0]["outdated"])
+                else:
+                    self.assertEqual((row["generation_status"], row["brief_case"]), ("already_generated", "info_only"))
+                    self.assertEqual(row["generation_changes"], {})
+                    self.assertFalse(row["images"][0]["outdated"])
+        self.assertEqual(set(ATTRIBUTES) - set(BRIEF_ATTRIBUTES), {"sku", "category", "price", "notes"})
+
+    def test_lowercase_skus_need_correction(self):
+        preview = self.preview([product("vase-001"), product("Vase-002"), product("VASE-003")])
+        self.assertEqual([row["change_type"] for row in preview["rows"]], ["invalid", "invalid", "new"])
+        self.assertIn("lowercase", preview["errors"][0])
+        self.assertFalse(preview["can_confirm"])
+        self.assertEqual(self.confirm(preview).status_code, 400)
+        self.assertEqual(self.catalog()["rows"], [])
 
     def test_malformed_empty_and_invalid_encoding_uploads_do_not_mutate_catalog(self):
         self.apply([product()])

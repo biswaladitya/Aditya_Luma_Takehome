@@ -1,9 +1,9 @@
-"""Slack review state per generated image. Like products.py, never commits or calls Slack."""
+"""Slack review state per posted image. Like products.py, never commits or calls Slack."""
 
 import sqlite3
 from datetime import datetime, timezone
 
-STATES = ("pending_send", "awaiting_approval", "approved")
+STATES = ("awaiting_approval", "approved")
 
 
 def _now() -> str:
@@ -22,22 +22,8 @@ def reviews_for_sku(connection: sqlite3.Connection, sku: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def queue_for_send(connection: sqlite3.Connection, sku: str, image_ids: list[str]) -> None:
-    """Create pending_send rows for unsent images and clear errors so failed sends retry."""
-    now = _now()
-    for image_id in image_ids:
-        connection.execute(
-            "INSERT OR IGNORE INTO image_reviews (image_id, product_sku, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?)", (image_id, sku, now, now),
-        )
-    connection.execute(
-        "UPDATE image_reviews SET send_error = NULL, updated_at = ? "
-        "WHERE product_sku = ? AND state = 'pending_send'", (now, sku),
-    )
-
-
 def thread_for_sku(connection: sqlite3.Connection, sku: str) -> tuple[str, str] | None:
-    """The product's existing (channel, thread_ts), so later sends reuse one thread."""
+    """The product's existing (channel, thread_ts), so later posts reuse one thread."""
     row = connection.execute(
         "SELECT slack_channel, slack_thread_ts FROM image_reviews "
         "WHERE product_sku = ? AND slack_thread_ts IS NOT NULL LIMIT 1", (sku,)
@@ -45,49 +31,35 @@ def thread_for_sku(connection: sqlite3.Connection, sku: str) -> tuple[str, str] 
     return (row[0], row[1]) if row else None
 
 
-def set_thread(connection: sqlite3.Connection, sku: str, channel: str, thread_ts: str) -> None:
+def record_post(connection: sqlite3.Connection, image_id: str, channel: str, thread_ts: str,
+                message_ts: str, file_id: str) -> None:
+    """A posted candidate waits on Ellie; the review keeps the image's brief version."""
+    now = _now()
     connection.execute(
-        "UPDATE image_reviews SET slack_channel = ?, slack_thread_ts = ?, updated_at = ? "
-        "WHERE product_sku = ? AND state = 'pending_send'", (channel, thread_ts, _now(), sku),
+        "INSERT OR IGNORE INTO image_reviews (image_id, product_sku, brief_version, slack_channel, slack_thread_ts, "
+        "slack_message_ts, slack_file_id, created_at, updated_at) "
+        "SELECT id, product_sku, brief_version, ?, ?, ?, ?, ?, ? FROM generated_images WHERE id = ?",
+        (channel, thread_ts, message_ts, file_id, now, now, image_id),
     )
-
-
-def mark_sent(connection: sqlite3.Connection, image_id: str, message_ts: str, file_id: str) -> None:
-    connection.execute(
-        "UPDATE image_reviews SET state = 'awaiting_approval', slack_message_ts = ?, slack_file_id = ?, "
-        "send_error = NULL, updated_at = ? WHERE image_id = ? AND state = 'pending_send'",
-        (message_ts, file_id, _now(), image_id),
-    )
-
-
-def mark_send_error(connection: sqlite3.Connection, image_ids: list[str], error: str) -> None:
-    for image_id in image_ids:
-        connection.execute(
-            "UPDATE image_reviews SET send_error = ?, updated_at = ? "
-            "WHERE image_id = ? AND state = 'pending_send'", (error, _now(), image_id),
-        )
-
-
-def fail_unsent(connection: sqlite3.Connection, reason: str) -> int:
-    """Rows left mid-send by a restart get an error so the UI offers a retry."""
-    return connection.execute(
-        "UPDATE image_reviews SET send_error = ? WHERE state = 'pending_send' AND send_error IS NULL",
-        (reason,),
-    ).rowcount
 
 
 def approve(connection: sqlite3.Connection, image_id: str, user_id: str) -> str:
-    """Approve an image; one approval per product and the decision is final.
+    """Approve an image made from the product's current brief; one approval per brief, always final.
 
-    Returns approved, already_approved, sibling_approved or not_awaiting.
+    Returns approved, already_approved, sibling_approved, outdated or not_awaiting.
     """
     review = get_review(connection, image_id)
-    if review is None or review["state"] == "pending_send":
+    if review is None:
         return "not_awaiting"
     if review["state"] == "approved":
         return "already_approved"
+    current = connection.execute(
+        "SELECT brief_version FROM products WHERE sku = ?", (review["product_sku"],)).fetchone()[0]
+    if review["brief_version"] < current:
+        return "outdated"
     taken = connection.execute(
-        "SELECT 1 FROM image_reviews WHERE product_sku = ? AND state = 'approved'", (review["product_sku"],)
+        "SELECT 1 FROM image_reviews WHERE product_sku = ? AND brief_version = ? AND state = 'approved'",
+        (review["product_sku"], review["brief_version"]),
     ).fetchone()
     if taken:
         return "sibling_approved"

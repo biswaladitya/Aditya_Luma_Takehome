@@ -1,4 +1,4 @@
-"""Explicit Drive delivery: write each product's approved image to the signed-in user's My Drive."""
+"""Explicit Drive delivery: write each product's approved images to the signed-in user's My Drive."""
 
 import logging
 import mimetypes
@@ -28,28 +28,28 @@ def _claim(sku: str) -> bool:
         return True
 
 
-def delivery_filename(sku: str, extension: str) -> str:
-    """`<SKU>_styled_01.<ext>`; ASSUMPTIONS.md: SKUs are case-unique and filename-safe.
+def delivery_filename(sku: str, version: int, extension: str) -> str:
+    """`<SKU>_styled_v<N>.<ext>` with the image's own version, so different images never share a name.
 
-    `_01` leaves room for the customer's 2-3 approved images later.
+    ASSUMPTIONS.md: SKUs are uppercase and filename-safe. A delivery keeps the filename it was queued with.
     """
-    return f"{sku.strip().upper()}_styled_01.{extension.lower().lstrip('.')}"
+    return f"{sku.strip().upper()}_styled_v{version}.{extension.lower().lstrip('.')}"
 
 
 def _skip_reason(row: dict | None) -> str | None:
     if row is None:
         return "Unknown SKU."
-    if row["review_status"] != "approved":
+    if not row["approved_image_ids"]:
         return "No approved image."
-    if row["delivery_status"] == "delivered":
-        return "Already saved to Drive."
-    if not row["can_deliver"]:
+    if row["delivering"]:
         return "Already saving to Drive."
+    if not row["can_deliver"]:
+        return "Already saved to Drive."
     return None
 
 
 def start_delivery(skus: list[str], access_token: str) -> dict:
-    """Queue approved images for Drive. Only this explicit request writes anything; approval never does.
+    """Queue every approved image not yet in Drive. Only this explicit request writes anything; approval never does.
 
     The access token comes from the user's Google sign-in in the browser. It is passed to the
     workers in memory for this batch only and never stored.
@@ -78,9 +78,10 @@ def start_delivery(skus: list[str], access_token: str) -> dict:
             elif not _claim(sku):
                 skipped.append({"sku": sku, "reason": "Already saving to Drive."})
             else:
-                image = next(image for image in row["images"] if image["id"] == row["approved_image_id"])
-                deliveries.queue(connection, sku, image["id"],
-                                 delivery_filename(sku, Path(image["storage_key"]).suffix or ".jpg"))
+                for image in row["images"]:
+                    if image["id"] in row["approved_image_ids"] and (image["delivery"] or {}).get("state") != "delivered":
+                        deliveries.queue(connection, sku, image["id"], delivery_filename(
+                            sku, image["version"], Path(image["storage_key"]).suffix or ".jpg"))
                 queued.append(sku)
     for sku in queued:  # Submit only after the pending rows are committed.
         _executor.submit(_deliver, sku, client)
@@ -88,7 +89,11 @@ def start_delivery(skus: list[str], access_token: str) -> dict:
 
 
 def _deliver(sku: str, client: drive.DriveClient) -> None:
-    """Create or overwrite the named file at the top of My Drive, recording each result as it lands."""
+    """Create each named file at the top of My Drive, recording each result as it lands.
+
+    A same-named file is overwritten: with versioned names that is this image, left by a crash
+    between upload and recording.
+    """
     try:
         with database() as connection:
             pending = [d for d in deliveries.deliveries_for_sku(connection, sku) if d["state"] == "pending"]

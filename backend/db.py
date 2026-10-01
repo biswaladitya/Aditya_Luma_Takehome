@@ -1,5 +1,6 @@
 """SQLite catalog storage. Call repository functions within ``database()``."""
 
+import json
 import os
 import sqlite3
 from collections.abc import Iterator
@@ -7,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 def _absolute_path(value: str) -> Path:
@@ -34,6 +35,7 @@ def data_directory() -> Path:
 
 
 # Review state lives beside generated_images, never inside it. See persistence.md.
+# This is the v3-v6 shape; v7 rebuilds the table (_BRIEF_REVIEW_SCHEMA).
 _REVIEW_SCHEMA = (
     """CREATE TABLE image_reviews (
         image_id TEXT PRIMARY KEY NOT NULL REFERENCES generated_images(id) ON DELETE RESTRICT,
@@ -55,7 +57,7 @@ _REVIEW_SCHEMA = (
                 AND approved_by IS NOT NULL AND approved_at IS NOT NULL))
     )""",
     "CREATE INDEX image_reviews_product_sku ON image_reviews(product_sku)",
-    # MVP rule: at most one approved image per product, enforced by the database.
+    # MVP rule: at most one approved image per product, enforced by the database. v6 narrows it to live approvals.
     "CREATE UNIQUE INDEX image_reviews_one_approved_per_sku ON image_reviews(product_sku) WHERE state = 'approved'",
     """CREATE TRIGGER image_reviews_forward_only
         BEFORE UPDATE OF state ON image_reviews
@@ -66,6 +68,54 @@ _REVIEW_SCHEMA = (
             SELECT RAISE(ABORT, 'review state can only move forward');
         END""",
 )
+
+# v6: an accepted CSV change replaced ("superseded") an approval not yet in Drive. v7 retires the rule.
+_SUPERSEDE_SCHEMA = (
+    "ALTER TABLE image_reviews ADD COLUMN superseded_at TEXT CHECK (superseded_at IS NULL OR state = 'approved')",
+    # At most one live (not superseded) approval per product.
+    "DROP INDEX image_reviews_one_approved_per_sku",
+    "CREATE UNIQUE INDEX image_reviews_one_approved_per_sku ON image_reviews(product_sku) "
+    "WHERE state = 'approved' AND superseded_at IS NULL",
+    """CREATE TRIGGER image_reviews_supersede_once
+        BEFORE UPDATE OF superseded_at ON image_reviews
+        WHEN NEW.superseded_at IS NOT OLD.superseded_at
+            AND NOT (OLD.superseded_at IS NULL AND NEW.superseded_at IS NOT NULL AND OLD.state = 'approved')
+        BEGIN
+            SELECT RAISE(ABORT, 'superseded_at can only be set once, on an approved review');
+        END""",
+)
+
+# v7: brief versions. Reviews exist only for posted candidates and remember the image's brief version,
+# so the database allows one approval per product and brief. See persistence.md.
+_BRIEF_REVIEW_SCHEMA = (
+    """CREATE TABLE image_reviews (
+        image_id TEXT PRIMARY KEY NOT NULL REFERENCES generated_images(id) ON DELETE RESTRICT,
+        product_sku TEXT NOT NULL REFERENCES products(sku) ON DELETE RESTRICT,
+        brief_version INTEGER NOT NULL CHECK (brief_version >= 1),
+        state TEXT NOT NULL DEFAULT 'awaiting_approval' CHECK (state IN ('awaiting_approval', 'approved')),
+        slack_channel TEXT,
+        slack_thread_ts TEXT,
+        slack_message_ts TEXT NOT NULL,
+        slack_file_id TEXT,
+        approved_by TEXT,
+        approved_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (state = 'awaiting_approval' OR (approved_by IS NOT NULL AND approved_at IS NOT NULL))
+    )""",
+    "CREATE INDEX image_reviews_product_sku ON image_reviews(product_sku)",
+    "CREATE UNIQUE INDEX image_reviews_one_approved_per_brief ON image_reviews(product_sku, brief_version) "
+    "WHERE state = 'approved'",
+    """CREATE TRIGGER image_reviews_forward_only
+        BEFORE UPDATE OF state ON image_reviews
+        WHEN NEW.state IS NOT OLD.state
+            AND NOT (OLD.state = 'awaiting_approval' AND NEW.state = 'approved')
+        BEGIN
+            SELECT RAISE(ABORT, 'review state can only move forward');
+        END""",
+)
+# Frozen with the migration: the product fields sent to Luma.
+_BRIEF = ("photo", "shot_idea", "product_name", "color", "material")
 
 # Drive delivery of approved images; review state is never changed by it. See google_drive_writeback.md.
 _DELIVERY_SCHEMA = (
@@ -152,8 +202,10 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         if existing is not None:
             raise RuntimeError("Refusing to initialize a nonempty, unversioned database")
         # executescript implicitly commits; individual statements keep DDL atomic.
-        for statement in _SCHEMA:
+        # Fresh installs replay the v5 tables and every later step, so both paths end with the same schema.
+        for statement in _SCHEMA + _SUPERSEDE_SCHEMA:
             connection.execute(statement)
+        _upgrade_to_v7(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         return
     # Upgrade one version at a time so older databases pass through every step.
@@ -186,9 +238,94 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         connection.execute(f"INSERT INTO drive_deliveries ({columns}) SELECT {columns} FROM drive_deliveries_v4")
         connection.execute("DROP TABLE drive_deliveries_v4")
         version = 5
+    if version == 5:
+        # v5 -> v6: existing approvals stay live; nothing has been superseded yet.
+        for statement in _SUPERSEDE_SCHEMA:
+            connection.execute(statement)
+        version = 6
+    if version == 6:
+        _upgrade_to_v7(connection)
+        version = 7
     if version != SCHEMA_VERSION:
         raise RuntimeError(f"Unsupported catalog schema version: {version}")
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _upgrade_to_v7(connection: sqlite3.Connection) -> None:
+    """v6 -> v7: brief versions replace superseded approvals, and posting moves onto generated_images.
+
+    Keeps every image, approval and delivery. Superseded approvals become ordinary approvals of their
+    (older) brief; unposted pending_send reviews are removed and their error moves to post_error.
+    """
+    for statement in ("DROP TRIGGER image_reviews_forward_only", "DROP TRIGGER image_reviews_supersede_once",
+                      "DROP INDEX image_reviews_product_sku", "DROP INDEX image_reviews_one_approved_per_sku",
+                      "ALTER TABLE image_reviews RENAME TO image_reviews_v6",
+                      "ALTER TABLE products ADD COLUMN brief_version INTEGER NOT NULL DEFAULT 1 CHECK (brief_version >= 1)",
+                      "ALTER TABLE generated_images ADD COLUMN brief_version INTEGER NOT NULL DEFAULT 1 "
+                      "CHECK (brief_version >= 1)",
+                      "ALTER TABLE generated_images ADD COLUMN post_error TEXT"):
+        connection.execute(statement)
+    _backfill_brief_versions(connection)
+    for statement in _BRIEF_REVIEW_SCHEMA:
+        connection.execute(statement)
+    columns = ("image_id, product_sku, state, slack_channel, slack_thread_ts, slack_message_ts, "
+               "slack_file_id, approved_by, approved_at, created_at, updated_at")
+    connection.execute(
+        f"INSERT INTO image_reviews (brief_version, {columns}) "
+        f"SELECT (SELECT brief_version FROM generated_images WHERE id = image_id), {columns} "
+        "FROM image_reviews_v6 WHERE state != 'pending_send'")
+    connection.execute(
+        "UPDATE generated_images SET post_error = (SELECT coalesce(send_error, 'Not posted') FROM image_reviews_v6 r "
+        "WHERE r.image_id = generated_images.id) "
+        "WHERE id IN (SELECT image_id FROM image_reviews_v6 WHERE state = 'pending_send')")
+    connection.execute("DROP TABLE image_reviews_v6")
+    # v6 named every save <SKU>_styled_01, so an undelivered row could share its name with another
+    # image's delivered file and overwrite it. Unsaved rows take the versioned name (delivery_filename);
+    # delivered rows keep theirs.
+    for image_id, sku, filename, version in connection.execute(
+            "SELECT d.image_id, d.product_sku, d.filename, i.version FROM drive_deliveries d "
+            "JOIN generated_images i ON i.id = d.image_id WHERE d.state = 'pending'").fetchall():
+        extension = Path(filename).suffix.lower().lstrip(".") or "jpg"
+        connection.execute("UPDATE drive_deliveries SET filename = ? WHERE image_id = ?",
+                           (f"{sku.strip().upper()}_styled_v{version}.{extension}", image_id))
+
+
+def _backfill_brief_versions(connection: sqlite3.Connection) -> None:
+    """Number each product's briefs from its image history, oldest first.
+
+    Images form one group while their saved brief stays the same. An image made after its group's
+    approval starts a new group too: v6 allowed that only once the approval was superseded, and
+    v7 allows one approval per brief version. The group matching the product's current brief (if
+    no superseded approval retired it) is numbered last, so every other image counts as outdated.
+    """
+    approvals = {row[0]: (row[1], row[2]) for row in connection.execute(
+        "SELECT image_id, approved_at, superseded_at FROM image_reviews_v6 WHERE state = 'approved'")}
+    for product in connection.execute(f"SELECT sku, {', '.join(_BRIEF)} FROM products").fetchall():
+        sku, current = product[0], list(product[1:])
+        groups: list[dict] = []
+        for image_id, generated_from, generated_at in connection.execute(
+                "SELECT id, generated_from, generated_at FROM generated_images "
+                "WHERE product_sku = ? ORDER BY generated_at, id", (sku,)).fetchall():
+            snapshot = json.loads(generated_from)
+            brief = [snapshot.get(key, "") for key in _BRIEF]
+            group = groups[-1] if groups else None
+            if group is None or group["brief"] != brief or (group["approved_at"] and generated_at > group["approved_at"]):
+                group = {"brief": brief, "ids": [], "approved_at": None, "superseded": False}
+                groups.append(group)
+            group["ids"].append(image_id)
+            if image_id in approvals:
+                approved_at, superseded_at = approvals[image_id]
+                group["approved_at"] = max(group["approved_at"] or "", approved_at)
+                group["superseded"] = group["superseded"] or superseded_at is not None
+        live = [group for group in groups if group["brief"] == current and not group["superseded"]]
+        if live:
+            groups.remove(live[-1])
+            groups.append(live[-1])
+        for number, group in enumerate(groups, start=1):
+            connection.executemany("UPDATE generated_images SET brief_version = ? WHERE id = ?",
+                                   [(number, image_id) for image_id in group["ids"]])
+        connection.execute("UPDATE products SET brief_version = ? WHERE sku = ?",
+                           (len(groups) if live else len(groups) + 1, sku))
 
 
 @contextmanager

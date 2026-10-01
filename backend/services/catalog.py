@@ -10,6 +10,7 @@ from litestar.exceptions import HTTPException
 
 from backend.db import data_directory, database
 from backend.repositories import products
+from backend.repositories.products import BRIEF_ATTRIBUTES
 
 COLUMNS = {
     "SKU": "sku", "Product Name": "product_name", "Category": "category",
@@ -25,6 +26,8 @@ EST_COST_PER_IMAGE_USD = 0.0644
 GENERATION_STATUSES = (
     "never_generated", "changed_since_generation", "already_generated", "missing_input"
 )
+ELIGIBLE = ("never_generated", "changed_since_generation")
+ACTIVE = ("queued", "processing")
 
 
 def attributes(row: dict) -> dict:
@@ -101,76 +104,96 @@ def parse_catalog(content: bytes, filename: str) -> list[dict]:
     sku_counts = Counter(row["sku"] for row in rows if row["sku"])
     for row in rows:
         row["issues"] = input_issues(row)
-        row["change_type"] = "invalid" if not row["sku"] or sku_counts[row["sku"]] > 1 else "new"
+        lowercase = row["sku"] != row["sku"].upper()
+        row["change_type"] = "invalid" if not row["sku"] or sku_counts[row["sku"]] > 1 or lowercase else "new"
         if row["sku"] and sku_counts[row["sku"]] > 1:
             row["issues"].append(f"Duplicate SKU '{row['sku']}': keep only one row per SKU before confirming.")
+        if lowercase:  # ASSUMPTIONS.md: SKUs are uppercase, so each maps to one Drive filename.
+            row["issues"].append(f"SKU '{row['sku']}' has lowercase letters: SKUs must be uppercase.")
     return rows
 
 
 def product_view(row: dict) -> dict:
-    """Compare current attributes with every immutable saved generation snapshot."""
+    """Derive generation, review and delivery state. An image is outdated when its brief_version is
+    lower than the product's; nothing else (price, notes, later approvals) makes it outdated."""
     result = dict(row)
     result["issues"] = list(row.get("issues", input_issues(row)))
     result["ready"] = not result["issues"] and row.get("change_type") != "invalid"
-    result["images"] = [
-        {**image, "image_url": f"/api/catalog/images/{image['id']}"} if image["status"] == "done" else image
-        for image in row.get("images", [])
-    ]
+    brief = row.get("brief_version") or 1
+    result["images"] = []
+    for image in row.get("images", []):
+        view = {**image, "outdated": image["brief_version"] < brief,
+                # Luma returned it and it is being posted to Slack; the file is already stored.
+                "posting": image["status"] == "processing" and image["luma_generation_id"] is not None}
+        if image["status"] == "done" or view["posting"]:
+            view["image_url"] = f"/api/catalog/images/{image['id']}"
+        result["images"].append(view)
     # Only completed images count as generations; queued and failed rows are just attempts.
     done = [image for image in result["images"] if image["status"] == "done"]
+    current = [image for image in done if not image["outdated"]]
     result["image_exists"] = bool(done)
-    matching = any(not changes_between(image["generated_from"], row) for image in done)
+    result["brief_changed"] = bool(done) and not current
     result["generation_changes"] = {}
-    if done and not matching:
+    if result["brief_changed"]:
         latest = max(done, key=lambda image: (image["generated_at"], image["id"]))
-        result["generation_changes"] = changes_between(latest["generated_from"], row)
+        result["generation_changes"] = brief_changes(latest["generated_from"], row)
     if not result["ready"]:
         status = "missing_input"
-    elif matching:
+    elif current:
         status = "already_generated"
     elif done:
         status = "changed_since_generation"
     else:
         status = "never_generated"
     result["generation_status"] = status
-    result.update(review_summary(done, row))
+    result.update(review_summary(result["images"]))
     result.update(delivery_summary(done))
+    result["can_generate"] = status in ELIGIBLE and not result["generating"] and not result["delivering"]
     return result
 
 
-def review_summary(done: list[dict], row: dict) -> dict:
-    """Derive review state from the images; nothing is stored on the product."""
-    reviews = [image["review"] for image in done if image["review"]]
-    approved = next((image for image in done if (image["review"] or {}).get("state") == "approved"), None)
-    states = {review["state"] for review in reviews}
-    # Only images made from the current product details may go to Slack; failed sends can retry.
-    reviewable = [
-        image["id"] for image in done
-        if not changes_between(image["generated_from"], row)
-        and (image["review"] is None or (image["review"]["state"] == "pending_send" and image["review"]["send_error"]))
-    ]
+def brief_changes(before: dict, after: dict) -> dict:
+    return {key: change for key, change in changes_between(before, after).items() if key in BRIEF_ATTRIBUTES}
+
+
+def review_summary(images: list[dict]) -> dict:
+    """Derive review state from the images; nothing is stored on the product.
+
+    A generation's candidates stay queued/processing until they are posted, so "generating" covers posting.
+    """
+    current = [image for image in images if not image["outdated"]]
+    approved = sorted((image for image in images if (image["review"] or {}).get("state") == "approved"),
+                      key=lambda image: image["review"]["approved_at"])
+    states = {image["review"]["state"] for image in current if image["review"]}
+    generating = any(image["status"] in ACTIVE for image in images)
+    # Done candidates for the current brief that never reached Slack; Retry posting sends them.
+    unposted = [image for image in current if image["status"] == "done" and image["review"] is None]
     return {
-        "review_status": "approved" if approved else next(
-            (state for state in ("awaiting_approval", "pending_send") if state in states), None),
-        "approved_image_id": approved["id"] if approved else None,
-        "send_error": next((r["send_error"] for r in reviews if r["send_error"]), None),
-        "reviewable_image_ids": [] if approved else reviewable,
-        "can_send": bool(reviewable) and not approved,
+        "generating": generating,
+        "review_status": "approved" if "approved" in states else "awaiting_approval" if states else None,
+        "approved_image_id": approved[-1]["id"] if approved else None,
+        "approved_image_ids": [image["id"] for image in approved],
+        "post_error": next((image["post_error"] for image in unposted if image["post_error"]), None),
+        "reviewable_image_ids": [] if "approved" in states else [image["id"] for image in unposted],
+        "can_send": bool(unposted) and "approved" not in states and not generating,
     }
 
 
 def delivery_summary(done: list[dict]) -> dict:
-    """Derive Drive delivery state for the approved image; nothing is stored on the product."""
-    approved = next((image for image in done if (image["review"] or {}).get("state") == "approved"), None)
-    delivery = (approved or {}).get("delivery")
-    status = delivery["state"] if delivery else None
-    error = delivery["error"] if delivery else None
+    """Derive Drive state over every approved image; nothing is stored on the product."""
+    approved = sorted((image for image in done if (image["review"] or {}).get("state") == "approved"),
+                      key=lambda image: image["review"]["approved_at"])
+    pending = [image["delivery"] for image in approved if (image["delivery"] or {}).get("state") == "pending"]
+    delivered = [image["delivery"] for image in approved if (image["delivery"] or {}).get("state") == "delivered"]
+    # A pending row without an error is in flight; one with an error is waiting for a retry.
+    delivering = any(not delivery["error"] for delivery in pending)
+    unsaved = [image for image in approved if not image["delivery"] or image["delivery"]["state"] == "pending"]
     return {
-        "delivery_status": status,
-        "delivery_error": error,
-        "drive_url": delivery["drive_url"] if delivery else None,
-        # A pending row without an error is in flight; one with an error is waiting for a retry.
-        "can_deliver": bool(approved) and (status is None or (status == "pending" and bool(error))),
+        "delivery_status": "pending" if pending else "delivered" if delivered else None,
+        "delivery_error": next((delivery["error"] for delivery in pending if delivery["error"]), None),
+        "drive_url": delivered[-1]["drive_url"] if delivered else None,
+        "delivering": delivering,
+        "can_deliver": bool(unsaved) and not delivering,
     }
 
 
@@ -194,7 +217,7 @@ def get_catalog(*, candidates_only: bool = False) -> dict:
     with database() as connection:
         rows = [product_view(row) for row in products.get_products(connection)]
     if candidates_only:
-        rows = [row for row in rows if row["generation_status"] in ("never_generated", "changed_since_generation")]
+        rows = [row for row in rows if row["generation_status"] in ELIGIBLE]
     return summarize(rows)
 
 
