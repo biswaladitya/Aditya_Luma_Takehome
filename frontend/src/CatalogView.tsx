@@ -13,7 +13,7 @@ const TABS: { id: string; label: string; stages: Stage[] | null; hint: string }[
   { id: 'ellie', label: 'With Ellie', stages: ['with_ellie'], hint: 'Team comments in Slack are advisory. Ellie’s Approve updates this page.' },
   { id: 'drive', label: 'To Drive', stages: ['approved', 'saving'], hint: 'Saves every approved image not yet in Drive to the top of your My Drive as SKU_styled_vN.' },
   { id: 'done', label: 'In Drive', stages: ['in_drive'], hint: 'Approved images already saved to Drive.' },
-  { id: 'input', label: 'Needs brief', stages: ['needs_input'], hint: 'Add a Shot Idea and a source photo to these rows in the CSV, then import it again.' },
+  { id: 'input', label: 'Missing attributes', stages: ['needs_input'], hint: 'Add a Shot Idea and a source photo to these rows in the CSV, then import it again.' },
 ]
 
 function Thumbnails({ row, perRequest, open }: { row: CatalogRow; perRequest: number; open: (image: GeneratedImage) => void }) {
@@ -142,7 +142,7 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
             </div>
             <div className="cell-idea">
               {row.shot_idea || <em className="muted">No Shot Idea</em>}
-              {row.brief_changed && <div className="warn">Brief changed after these images were made</div>}
+              {row.brief_changed && <div className="warn">Product attributes changed after these images were made</div>}
             </div>
             <Thumbnails row={row} perRequest={perRequest} open={image => setViewing({ sku: row.sku, imageId: image.id })} />
             <StageLabel stage={stage} />

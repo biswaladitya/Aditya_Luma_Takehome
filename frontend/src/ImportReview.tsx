@@ -9,13 +9,13 @@ const fieldNames: Record<string, string> = {
 /** Shown groups, in order; unchanged rows are listed separately. */
 const GROUPS: { id: BriefCase; title: string; tag: string; tone: string; note?: string }[] = [
   { id: 'new', title: 'New', tag: 'NEW', tone: 'new' },
-  { id: 'not_generated', title: 'Brief changed', tag: 'BRIEF CHANGED', tone: 'changed', note: 'No images yet, so nothing else changes.' },
-  { id: 'with_ellie', title: 'Brief changed, waiting on Ellie', tag: 'BRIEF CHANGED', tone: 'changed',
+  { id: 'not_generated', title: 'Product attributes changed', tag: 'ATTRIBUTES CHANGED', tone: 'changed', note: 'No images yet, so nothing else changes.' },
+  { id: 'with_ellie', title: 'Product attributes changed, waiting on Ellie', tag: 'ATTRIBUTES CHANGED', tone: 'changed',
     note: 'Its candidates become Outdated: Ellie can no longer approve them, and their Approve buttons are removed in Slack. Generate again from the catalog when you’re ready.' },
-  { id: 'approved_not_in_drive', title: 'Brief changed, approved, not in Drive', tag: 'BRIEF CHANGED', tone: 'changed',
-    note: 'Ellie’s approval is kept and can still be saved to Drive. Regenerating for the new brief is optional.' },
-  { id: 'in_drive', title: 'Brief changed, in Drive', tag: 'BRIEF CHANGED', tone: 'changed',
-    note: 'The image in Drive is kept. Regenerating for the new brief is optional.' },
+  { id: 'approved_not_in_drive', title: 'Product attributes changed, approved, not in Drive', tag: 'ATTRIBUTES CHANGED', tone: 'changed',
+    note: 'Ellie’s approval is kept and can still be saved to Drive. Regenerating with the new product attributes is optional.' },
+  { id: 'in_drive', title: 'Product attributes changed, in Drive', tag: 'ATTRIBUTES CHANGED', tone: 'changed',
+    note: 'The image in Drive is kept. Regenerating with the new product attributes is optional.' },
   { id: 'info_only', title: 'Info only', tag: 'INFO ONLY', tone: 'info', note: 'Price, category or notes only. Images and approvals are unaffected.' },
   { id: 'invalid', title: 'Needs correction', tag: 'NEEDS CORRECTION', tone: 'invalid' },
 ]
@@ -138,7 +138,7 @@ export default function ImportReview({ preview, onPreview, onApplied, onCancel }
         {fileInput}
       </div>
       <div className="chips">
-        <span className="chip chip-changed">{briefChanged} brief changed</span>
+        <span className="chip chip-changed">{briefChanged} with changed product attributes</span>
         <span className="chip">{count('info_only')} info only</span>
         <span className="chip chip-new">{preview.new_count} new</span>
         <span className={`chip ${preview.invalid_count ? 'chip-invalid' : ''}`}>{preview.invalid_count} need correction</span>

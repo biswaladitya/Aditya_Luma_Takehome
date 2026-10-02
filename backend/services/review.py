@@ -16,7 +16,7 @@ from backend.services.catalog import product_view
 
 logger = logging.getLogger(__name__)
 APPROVE_ACTION = "approve_image"
-OUTDATED = "Outdated: brief changed"
+OUTDATED = "Outdated: product attributes changed"
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack")
 
@@ -39,7 +39,7 @@ def review_blocks(brief: dict, version: int, image_id: str, footer: str | None =
             "text": {"type": "plain_text", "text": "Approve"},
             "confirm": {
                 "title": {"type": "plain_text", "text": "Approve this image?"},
-                "text": {"type": "mrkdwn", "text": "Only one image can be approved for this brief, and it cannot be undone."},
+                "text": {"type": "mrkdwn", "text": "Only one image can be approved for these product attributes, and it cannot be undone."},
                 "confirm": {"type": "plain_text", "text": "Approve"},
                 "deny": {"type": "plain_text", "text": "Cancel"},
             },
@@ -175,8 +175,8 @@ def handle_block_action(payload: dict, client=None) -> str | None:
                     if item["brief_version"] == review["brief_version"]] if review else []
         product = products.get_products(connection, [review["product_sku"]])[0] if review else None
     messages = {
-        "outdated": "This image was made from an older brief, so it can't be approved. New images can be generated in the web app.",
-        "sibling_approved": "Another image for this brief is already approved. Only one can be approved.",
+        "outdated": "This image was made from older product attributes, so it can't be approved. New images can be generated in the web app.",
+        "sibling_approved": "Another image for these product attributes is already approved. Only one can be approved.",
         "already_approved": "This image is already approved.",
         "not_awaiting": "This image is not waiting for approval.",
     }

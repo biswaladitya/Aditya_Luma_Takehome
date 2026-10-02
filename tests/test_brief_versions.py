@@ -105,7 +105,7 @@ class BriefVersionTests(unittest.TestCase):
         self.assertEqual((row["review_status"], row["generation_status"], row["can_generate"]),
                          (None, "changed_since_generation", True))
         self.assertEqual(handle_block_action(click(waiting[0]), self.slack), "outdated")
-        self.assertIn("older brief", self.slack.ephemerals[-1][1])
+        self.assertIn("older product attributes", self.slack.ephemerals[-1][1])
         self.assertEqual(self.row()["images"][0]["review"]["state"], "awaiting_approval")
         self.assertEqual(self.luma.call_count, 2)  # Regenerating needs an explicit click.
         fresh = self.generate()

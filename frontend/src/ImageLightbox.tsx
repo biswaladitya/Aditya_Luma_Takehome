@@ -10,10 +10,10 @@ function status(image: GeneratedImage | null, row: CatalogRow): { label: string;
   if (review?.state === 'approved') {
     const when = review.approved_at ? ` · ${new Date(review.approved_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}` : ''
     const drive = image.delivery?.state === 'delivered' ? ` · In Drive as ${image.delivery.filename}` : ''
-    return { label: `Approved for brief v${image.brief_version}`, tone: 'amber', detail: `Approved by Ellie in Slack${when}${drive}` }
+    return { label: `Approved · attributes v${image.brief_version}`, tone: 'amber', detail: `Approved by Ellie in Slack${when}${drive}` }
   }
-  if (image.outdated) return { label: 'Outdated', tone: 'neutral', detail: review ? 'Made from an older brief, so it can’t be approved' : 'Made from an older brief' }
-  if (notSelected(row, image)) return { label: 'Not selected', tone: 'neutral', detail: 'Ellie approved another candidate for this brief' }
+  if (image.outdated) return { label: 'Outdated', tone: 'neutral', detail: review ? 'Made from older product attributes, so it can’t be approved' : 'Made from older product attributes' }
+  if (notSelected(row, image)) return { label: 'Not selected', tone: 'neutral', detail: 'Ellie approved another candidate for the same product attributes' }
   if (review?.state === 'awaiting_approval') return { label: 'In Slack', tone: 'blue', detail: 'Waiting on Ellie' }
   if (image.posting) return { label: 'Posting', tone: 'blue', detail: 'Posting to Slack…' }
   return { label: 'Not posted', tone: image.post_error ? 'failed' : 'neutral', detail: image.post_error || 'Not posted to Slack yet' }

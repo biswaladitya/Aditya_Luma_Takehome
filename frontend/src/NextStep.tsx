@@ -10,7 +10,7 @@ export type Actions = {
 }
 
 export const STAGES: Record<Stage, { label: string; tone: string; done: number }> = {
-  needs_input: { label: 'Needs brief', tone: 'input', done: 0 },
+  needs_input: { label: 'Missing attributes', tone: 'input', done: 0 },
   ready: { label: 'Ready to generate', tone: 'neutral', done: 0 },
   failed: { label: 'Generation failed', tone: 'failed', done: 0 },
   generating: { label: 'Generating', tone: 'blue', done: 1 },
@@ -35,7 +35,7 @@ export function StageLabel({ stage }: { stage: Stage }) {
 function Regenerate({ row, name, actions }: { row: CatalogRow; name: string; actions: Actions }) {
   if (!row.brief_changed || !row.can_generate) return null
   return <>
-    <p className="step-sub left">Brief changed since this was approved.</p>
+    <p className="step-sub left">Product attributes changed since this was approved.</p>
     <button type="button" className="secondary-button block" disabled={actions.generating} onClick={() => void actions.generate([row.sku])} aria-label={`Regenerate: ${name}`}>Regenerate</button>
   </>
 }
