@@ -1,5 +1,6 @@
 """Drive delivery endpoints. Writing to Drive happens only on an explicit request."""
 
+import re
 from dataclasses import dataclass
 
 from litestar import get, post
@@ -16,8 +17,11 @@ class DeliveryRequest:
 
 @get("/api/drive/config", sync_to_thread=True)
 def drive_config() -> dict:
-    """The public OAuth client ID the browser needs to show Google sign-in."""
-    return {"client_id": setting("GOOGLE_CLIENT_ID")}
+    """Public browser identifiers, not secrets: the OAuth client ID for Google sign-in, plus the
+    API key and app ID (project number, the client ID's leading digits) that Google Picker needs."""
+    client_id = setting("GOOGLE_CLIENT_ID")
+    project = re.match(r"(\d+)-", client_id or "")
+    return {"client_id": client_id, "api_key": setting("GOOGLE_CLOUD_API_KEY"), "app_id": project and project.group(1)}
 
 
 @post("/api/deliveries", status_code=202, sync_to_thread=True)

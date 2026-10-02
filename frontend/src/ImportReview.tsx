@@ -1,5 +1,7 @@
 import { useRef, useState, type DragEvent } from 'react'
 import { confirmCatalogUpdate, uploadCatalogPreview, type BriefCase, type CatalogPreview, type CatalogRow, type FieldChanges } from './catalogApi'
+import { checkPickerConfigured, downloadCatalogFile, DriveSignInError, pickCatalogFile } from './drivePicker'
+import { clearDriveToken, getDriveToken } from './googleAuth'
 
 const fieldNames: Record<string, string> = {
   sku: 'SKU', product_name: 'Product name', category: 'Category', color: 'Color / Finish',
@@ -60,7 +62,7 @@ export default function ImportReview({ preview, onPreview, onApplied, onCancel }
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const busyRef = useRef(false)
-  const [busy, setBusy] = useState<'uploading' | 'confirming' | null>(null)
+  const [busy, setBusy] = useState<'fetching' | 'uploading' | 'confirming' | null>(null)
   const [error, setError] = useState('')
   const [dragging, setDragging] = useState(false)
   const [showUnchanged, setShowUnchanged] = useState(false)
@@ -80,6 +82,39 @@ export default function ImportReview({ preview, onPreview, onApplied, onCancel }
       setBusy(null)
       if (inputRef.current) inputRef.current.value = ''
     }
+  }
+
+  /** Pick a CSV or Sheet in Google Drive and preview it like a local upload. */
+  function fetchFromDrive() {
+    if (busyRef.current) return
+    setError('')
+    let tokenRequest: Promise<string>
+    try {
+      checkPickerConfigured()
+      // Before any await: the sign-in popup is only allowed while the browser is handling the click.
+      tokenRequest = getDriveToken()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not open Google Drive.')
+      return
+    }
+    busyRef.current = true
+    void (async () => {
+      try {
+        const token = await tokenRequest
+        const picked = await pickCatalogFile(token)
+        if (!picked) return // Cancelled: not an error.
+        setBusy('fetching')
+        const file = await downloadCatalogFile(token, picked)
+        busyRef.current = false // Hand over to upload(), which takes busyRef again before its first await.
+        await upload(file)
+      } catch (cause) {
+        if (cause instanceof DriveSignInError) clearDriveToken()
+        setError(cause instanceof Error ? cause.message : 'Could not fetch this file from Google Drive.')
+      } finally {
+        busyRef.current = false
+        setBusy(null)
+      }
+    })()
   }
 
   async function accept() {
@@ -111,10 +146,11 @@ export default function ImportReview({ preview, onPreview, onApplied, onCancel }
     <div className="crumbs"><button type="button" className="link-button" onClick={onCancel}>Catalog</button> / Import CSV</div>
     <h1 className="page-title">Import CSV</h1>
     <p className="page-sub">Upload the latest catalog export. You’ll review what changed before anything is saved.</p>
-    <div className={`dropzone ${dragging ? 'dragging' : ''}`} aria-busy={busy === 'uploading'}
+    <div className={`dropzone ${dragging ? 'dragging' : ''}`} aria-busy={busy === 'uploading' || busy === 'fetching'}
       onDragOver={event => { event.preventDefault(); if (!busy) setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
-      <p>{busy === 'uploading' ? 'Comparing your catalog…' : 'Drop a CSV here, or'}</p>
+      <p>{busy === 'uploading' ? 'Comparing your catalog…' : busy === 'fetching' ? 'Downloading from Google Drive…' : 'Drop a CSV here, or'}</p>
       <button type="button" className="primary-button" onClick={() => inputRef.current?.click()} disabled={Boolean(busy)}>Choose CSV</button>
+      <button type="button" className="secondary-button" onClick={fetchFromDrive} disabled={Boolean(busy)}>Fetch from Google Drive</button>
       {fileInput}
     </div>
     {errorBox}
@@ -134,7 +170,10 @@ export default function ImportReview({ preview, onPreview, onApplied, onCancel }
           <h1 className="page-title">Review changes</h1>
           <p className="page-sub">{preview.filename} · {preview.total_rows} rows · Nothing changes until you accept.</p>
         </div>
-        <button type="button" className="secondary-button" onClick={() => inputRef.current?.click()} disabled={Boolean(busy)}>{busy === 'uploading' ? 'Comparing…' : 'Upload a different CSV'}</button>
+        <div className="head-actions">
+          <button type="button" className="secondary-button" onClick={() => inputRef.current?.click()} disabled={Boolean(busy)}>{busy === 'uploading' ? 'Comparing…' : 'Upload a different CSV'}</button>
+          <button type="button" className="secondary-button" onClick={fetchFromDrive} disabled={Boolean(busy)}>{busy === 'fetching' ? 'Downloading from Google Drive…' : 'Fetch from Google Drive'}</button>
+        </div>
         {fileInput}
       </div>
       <div className="chips">

@@ -77,7 +77,7 @@ class DeliveryTests(unittest.TestCase):
         env = patch.dict(os.environ, {
             "DATABASE_PATH": str(Path(temporary.name) / "catalog.sqlite3"), "DATA_DIR": "",
             "SLACK_APP_TOKEN": "", "SLACK_BOT_TOKEN": "",
-            "GOOGLE_CLIENT_ID": "cid.apps.googleusercontent.com",
+            "GOOGLE_CLIENT_ID": "1234567890-cid.apps.googleusercontent.com", "GOOGLE_CLOUD_API_KEY": "AIza-test-key",
         })
         env.start()
         self.addCleanup(env.stop)
@@ -221,10 +221,16 @@ class DeliveryTests(unittest.TestCase):
         self.deliver(["MUG-1"])
         self.assertEqual(self.drive.tokens, [])
 
-    def test_config_exposes_only_the_public_client_id(self):
-        self.assertEqual(self.client.get("/api/drive/config").json(), {"client_id": "cid.apps.googleusercontent.com"})
-        with patch.dict(os.environ, {"GOOGLE_CLIENT_ID": ""}):
-            self.assertEqual(self.client.get("/api/drive/config").json(), {"client_id": None})
+    def test_config_exposes_only_public_browser_identifiers(self):
+        config = lambda: self.client.get("/api/drive/config").json()
+        self.assertEqual(config(), {
+            "client_id": "1234567890-cid.apps.googleusercontent.com", "api_key": "AIza-test-key", "app_id": "1234567890",
+        })
+        with patch.dict(os.environ, {"GOOGLE_CLIENT_ID": "", "GOOGLE_CLOUD_API_KEY": ""}):
+            self.assertEqual(config(), {"client_id": None, "api_key": None, "app_id": None})
+        for malformed in ("cid.apps.googleusercontent.com", "-cid.apps.googleusercontent.com", "12ab-cid.apps.googleusercontent.com"):
+            with patch.dict(os.environ, {"GOOGLE_CLIENT_ID": malformed}):
+                self.assertIsNone(config()["app_id"], malformed)
 
     def test_failure_is_visible_retryable_and_isolated(self):
         self.drive.fail_uploads = 1  # Only the first upload fails; workers may run in either order.

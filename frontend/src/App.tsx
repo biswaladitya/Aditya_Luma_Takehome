@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import CatalogView from './CatalogView'
 import { catalogRequest, deliverToDrive, generateImages, isDelivering, isGenerating, isInReview, sendForReview, type Catalog, type CatalogPreview } from './catalogApi'
+import { preparePicker } from './drivePicker'
 import { clearDriveToken, getDriveToken, prepareGoogleSignIn } from './googleAuth'
 import ImportReview from './ImportReview'
 import type { Actions } from './NextStep'
@@ -65,8 +66,11 @@ export default function App() {
     return () => { active = false }
   }, [])
 
-  // Load Google sign-in early so a Save to Drive click can open its popup without being blocked.
-  useEffect(() => { prepareGoogleSignIn().catch(() => { /* The click reports what is missing. */ }) }, [])
+  // Load Google sign-in and Picker early so a Save to Drive or Fetch from Google Drive click can open its popup without being blocked.
+  useEffect(() => {
+    prepareGoogleSignIn().catch(() => { /* The click reports what is missing. */ })
+    preparePicker().catch(() => { /* Retried, and reported, on the click. */ })
+  }, [])
 
   function choosePreview(next: CatalogPreview | null) {
     setPreview(next)
