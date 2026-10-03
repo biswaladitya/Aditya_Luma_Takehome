@@ -156,15 +156,16 @@ def _mark_outdated(items: list[dict]) -> None:
 
 
 def handle_block_action(payload: dict, client=None) -> str | None:
-    """Apply an Approve click. Only the configured approver may decide, only on an image made from the
-    product's current brief, and only while that brief has no approval."""
+    """Apply an Approve click. Anyone may decide unless SLACK_APPROVER_USER_ID is set, then only that
+    user; only on an image made from the product's current brief, and only while that brief has no approval."""
     action = (payload.get("actions") or [{}])[0]
     if action.get("action_id") != APPROVE_ACTION:
         return None
     client = client or slack.client()
     user = payload["user"]["id"]
     channel = payload.get("channel", {}).get("id") or ""
-    if user != slack.setting("SLACK_APPROVER_USER_ID"):
+    approver = slack.setting("SLACK_APPROVER_USER_ID")
+    if approver and user != approver:
         client.post_ephemeral(channel, user, "Only the designated approver can approve images.")
         return "unauthorized"
     image_id = action["value"]
