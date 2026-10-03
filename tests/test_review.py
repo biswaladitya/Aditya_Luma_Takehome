@@ -62,7 +62,7 @@ class ReviewTests(unittest.TestCase):
         env = patch.dict(os.environ, {
             "DATABASE_PATH": str(self.directory / "catalog.sqlite3"), "DATA_DIR": "",
             "SLACK_APP_TOKEN": "", "SLACK_BOT_TOKEN": "xoxb-test",
-            "SLACK_CHANNEL_ID": "C1", "SLACK_APPROVER_USER_ID": ELLIE,
+            "SLACK_CHANNEL_ID": "C1", "SLACK_APPROVER_USER_ID": "",
         })
         env.start()
         self.addCleanup(env.stop)
@@ -150,11 +150,34 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(self.row()["approved_image_id"], first)
         self.assertEqual(len(self.slack.ephemerals), 2)
 
+    # Ellie-only is relaxed during tester access; remove the marker when the client deployment sets SLACK_APPROVER_USER_ID.
+    @unittest.expectedFailure
     def test_only_the_approver_can_decide(self):
         self.generate()
         self.assertEqual(handle_block_action(click(self.image_ids()[0], user="USOMEONE"), self.slack), "unauthorized")
         self.assertEqual(self.row()["review_status"], "awaiting_approval")
         self.assertIn("Only the designated approver", self.slack.ephemerals[0][1])
+
+    # Testing phase only: retire once the client deployment restricts approval to Ellie.
+    def test_anyone_can_approve(self):
+        self.generate()
+        first, second = self.image_ids()
+        self.assertEqual(handle_block_action(click(first, user="USOMEONE"), self.slack), "approved")
+        with database() as connection:
+            approved_by = connection.execute("SELECT approved_by FROM image_reviews WHERE image_id = ?", (first,)).fetchone()[0]
+        self.assertEqual(approved_by, "USOMEONE")
+        self.assertIn("✅ Approved by <@USOMEONE>", [u["text"] for u in self.slack.updates])
+        self.assertEqual(self.slack.ephemerals, [])
+        self.assertEqual(handle_block_action(click(second, user="UOTHER"), self.slack), "sibling_approved")
+
+    def test_configured_approver_is_enforced(self):
+        self.generate()
+        first = self.image_ids()[0]
+        with patch.dict(os.environ, {"SLACK_APPROVER_USER_ID": ELLIE}):
+            self.assertEqual(handle_block_action(click(first, user="USOMEONE"), self.slack), "unauthorized")
+            self.assertEqual(self.row()["review_status"], "awaiting_approval")
+            self.assertIn("Only the designated approver", self.slack.ephemerals[0][1])
+            self.assertEqual(handle_block_action(click(first), self.slack), "approved")
 
     def test_database_enforces_one_final_approval_per_brief(self):
         self.generate()
