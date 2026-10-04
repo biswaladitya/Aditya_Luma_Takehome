@@ -15,9 +15,9 @@ const GROUPS: { id: BriefCase; title: string; tag: string; tone: string; note?: 
   { id: 'with_ellie', title: 'Product attributes changed, waiting on Ellie', tag: 'ATTRIBUTES CHANGED', tone: 'changed',
     note: 'Its candidates become Outdated: Ellie can no longer approve them, and their Approve buttons are removed in Slack. Generate again from the catalog when you’re ready.' },
   { id: 'approved_not_in_drive', title: 'Product attributes changed, approved, not in Drive', tag: 'ATTRIBUTES CHANGED', tone: 'changed',
-    note: 'Ellie’s approval is kept and can still be saved to Drive. Regenerating with the new product attributes is optional.' },
+    note: 'Ellie’s approvals are kept and can still be saved to Drive. Regenerating with the new product attributes is optional.' },
   { id: 'in_drive', title: 'Product attributes changed, in Drive', tag: 'ATTRIBUTES CHANGED', tone: 'changed',
-    note: 'The image in Drive is kept. Regenerating with the new product attributes is optional.' },
+    note: 'What is in Drive is kept. Regenerating with the new product attributes is optional.' },
   { id: 'info_only', title: 'Info only', tag: 'INFO ONLY', tone: 'info', note: 'Price, category or notes only. Images and approvals are unaffected.' },
   { id: 'invalid', title: 'Needs correction', tag: 'NEEDS CORRECTION', tone: 'invalid' },
 ]
@@ -190,7 +190,8 @@ export default function ImportReview({ preview, onPreview, onApplied, onCancel }
           {group.rows.map((row, index) => <div className="import-grid import-row" key={`${row.sku}-${row.row_number ?? index}`}>
             <span className={`tag change-${group.tone}`}>{group.tag}</span>
             <div className="product-cell"><Thumb row={row} /><div><strong>{row.product_name || 'Unnamed product'}</strong><small>{row.sku || `Row ${row.row_number}`}{row.color ? ` · ${row.color}` : ''}</small></div></div>
-            <WhatChanged row={row} note={group.note} />
+            <WhatChanged row={row} note={group.id !== 'with_ellie' && row.candidates_outdated
+              ? `${group.note} Its ${row.candidates_outdated} candidate${row.candidates_outdated === 1 ? '' : 's'} still waiting on Ellie become${row.candidates_outdated === 1 ? 's' : ''} Outdated.` : group.note} />
           </div>)}
         </section>)}
         {!groups.length && <p className="empty-row">Nothing in this file differs from the saved catalog.</p>}

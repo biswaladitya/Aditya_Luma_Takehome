@@ -1,4 +1,4 @@
-"""Generation queues two candidates per SKU, stores files by name, and reports failures."""
+"""Generation queues four candidates per SKU, stores files by name, and reports failures."""
 
 import os
 import tempfile
@@ -40,14 +40,14 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(image_filename(row, 2), "a-1_ceramic-vase_decor_blue-matte_ceramic_v2.jpg")
         self.assertEqual(slug("///"), "na")
 
-    def test_generates_two_candidates_and_skips_ineligible(self):
+    def test_generates_four_candidates_and_skips_ineligible(self):
         with patch("backend.luma.generate_image", return_value=("gen-1", b"img", "image/png")):
             response = self.client.post("/api/generations", json={"skus": ["A-1", "B-2", "NOPE"]})
             self.assertEqual(response.status_code, 202)
             self.assertEqual(response.json()["queued"], ["A-1"])
             self.assertEqual({s["sku"] for s in response.json()["skipped"]}, {"B-2", "NOPE"})
             images = self.wait()
-        self.assertEqual(sorted(i["version"] for i in images), [1, 2])
+        self.assertEqual(sorted(i["version"] for i in images), [1, 2, 3, 4])
         self.assertTrue(all(i["status"] == "done" and i["storage_key"].endswith(".png") for i in images))
         for image in images:
             self.assertEqual(self.client.get(image["image_url"]).content, b"img")

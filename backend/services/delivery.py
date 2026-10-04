@@ -49,7 +49,8 @@ def _skip_reason(row: dict | None) -> str | None:
 
 
 def start_delivery(skus: list[str], access_token: str) -> dict:
-    """Queue every approved image not yet in Drive. Only this explicit request writes anything; approval never does.
+    """Queue every saveable approved image not yet in Drive (catalog.delivery_summary). Only this explicit
+    request writes anything; approval never does.
 
     The access token comes from the user's Google sign-in in the browser. It is passed to the
     workers in memory for this batch only and never stored.
@@ -79,7 +80,7 @@ def start_delivery(skus: list[str], access_token: str) -> dict:
                 skipped.append({"sku": sku, "reason": "Already saving to Drive."})
             else:
                 for image in row["images"]:
-                    if image["id"] in row["approved_image_ids"] and (image["delivery"] or {}).get("state") != "delivered":
+                    if image["id"] in row["unsaved_image_ids"]:
                         deliveries.queue(connection, sku, image["id"], delivery_filename(
                             sku, image["version"], Path(image["storage_key"]).suffix or ".jpg"))
                 queued.append(sku)

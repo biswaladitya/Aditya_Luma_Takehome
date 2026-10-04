@@ -19,13 +19,23 @@ def brief_case(row: dict, saved: dict | None) -> str:
         return "info_only"
     view = product_view(saved)
     # Same precedence as productStage in catalogApi.ts.
-    if view["can_deliver"] or view["delivering"]:
-        return "approved_not_in_drive"  # The approval is kept and can still be saved.
+    if any((image["delivery"] or {}).get("state") != "delivered"
+           for image in view["images"] if image["id"] in view["approved_image_ids"]):
+        return "approved_not_in_drive"  # The approvals are kept and can still be saved.
     if view["generation_status"] == "already_generated" and view["review_status"] != "approved":
         return "with_ellie"  # Its candidates become outdated, even after an earlier brief reached Drive.
     if view["delivery_status"] == "delivered":
         return "in_drive"
     return "not_generated"
+
+
+def candidates_outdated(saved: dict) -> int:
+    """Waiting candidates a brief change takes from Ellie; an approved product can still have some."""
+    view = product_view(saved)
+    if view["approval_limit_reached"]:
+        return 0
+    return sum(not image["outdated"] and (image["review"] or {}).get("state") == "awaiting_approval"
+               for image in view["images"])
 
 
 def busy(saved: dict) -> bool:
@@ -68,6 +78,7 @@ def preview_catalog_import(content: bytes, filename: str) -> dict:
             if row["change_type"] != "invalid":
                 row["change_type"] = "new" if saved is None else "changed" if row["changes"] else "unchanged"
             row["brief_case"] = brief_case(row, saved)
+            row["candidates_outdated"] = candidates_outdated(saved) if saved and brief_changes(saved, row) else 0
             row["images"] = saved["images"] if saved else []
             row["version"] = saved["version"] if saved else None
             # As the product would be once accepted, so outdated images show as outdated.
@@ -119,12 +130,12 @@ def confirm_catalog_import(preview_id: str) -> dict:
             products.save_product(connection, attributes(row))
         # Their Approve buttons in Slack are removed after the commit; Approve is refused regardless.
         # Only the brief being replaced still has Approve buttons: older ones are already marked, and
-        # a brief with an approval shows "Not selected" on the rest.
+        # a brief at its approval limit shows "Not selected" on the rest.
         outdated = []
         for sku in rebriefed:
             items = [item for item in reviews.reviews_for_sku(connection, sku)
                      if item["brief_version"] == current[sku]["brief_version"]]
-            if not any(item["state"] == "approved" for item in items):
+            if sum(item["state"] == "approved" for item in items) < reviews.MAX_APPROVED_PER_BRIEF:
                 outdated += [item for item in items if item["state"] == "awaiting_approval"]
         # Preserve the original review. GET /api/catalog returns current versions.
         result = {**result, "status": "applied", "can_confirm": False}

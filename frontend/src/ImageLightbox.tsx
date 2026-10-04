@@ -13,7 +13,7 @@ function status(image: GeneratedImage | null, row: CatalogRow): { label: string;
     return { label: `Approved · attributes v${image.brief_version}`, tone: 'amber', detail: `Approved by Ellie in Slack${when}${drive}` }
   }
   if (image.outdated) return { label: 'Outdated', tone: 'neutral', detail: review ? 'Made from older product attributes, so it can’t be approved' : 'Made from older product attributes' }
-  if (notSelected(row, image)) return { label: 'Not selected', tone: 'neutral', detail: 'Ellie approved another candidate for the same product attributes' }
+  if (notSelected(row, image)) return { label: 'Not selected', tone: 'neutral', detail: `Ellie approved ${row.approvals_max} other candidates for the same product attributes` }
   if (review?.state === 'awaiting_approval') return { label: 'In Slack', tone: 'blue', detail: 'Waiting on Ellie' }
   if (image.posting) return { label: 'Posting', tone: 'blue', detail: 'Posting to Slack…' }
   return { label: 'Not posted', tone: image.post_error ? 'failed' : 'neutral', detail: image.post_error || 'Not posted to Slack yet' }

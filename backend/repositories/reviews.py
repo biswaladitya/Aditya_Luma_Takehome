@@ -4,6 +4,9 @@ import sqlite3
 from datetime import datetime, timezone
 
 STATES = ("awaiting_approval", "approved")
+# ASSUMPTIONS.md: per product and brief version. MIN makes a product ready for Drive; MAX ends its review.
+MIN_APPROVED_PER_BRIEF = 1
+MAX_APPROVED_PER_BRIEF = 3
 
 
 def _now() -> str:
@@ -43,10 +46,17 @@ def record_post(connection: sqlite3.Connection, image_id: str, channel: str, thr
     )
 
 
-def approve(connection: sqlite3.Connection, image_id: str, user_id: str) -> str:
-    """Approve an image made from the product's current brief; one approval per brief, always final.
+def approved_count(connection: sqlite3.Connection, sku: str, brief_version: int) -> int:
+    return connection.execute(
+        "SELECT COUNT(*) FROM image_reviews WHERE product_sku = ? AND brief_version = ? AND state = 'approved'",
+        (sku, brief_version),
+    ).fetchone()[0]
 
-    Returns approved, already_approved, sibling_approved, outdated or not_awaiting.
+
+def approve(connection: sqlite3.Connection, image_id: str, user_id: str) -> str:
+    """Approve an image made from the product's current brief; up to MAX_APPROVED_PER_BRIEF per brief, always final.
+
+    Returns approved, already_approved, approval_limit, outdated or not_awaiting.
     """
     review = get_review(connection, image_id)
     if review is None:
@@ -57,18 +67,12 @@ def approve(connection: sqlite3.Connection, image_id: str, user_id: str) -> str:
         "SELECT brief_version FROM products WHERE sku = ?", (review["product_sku"],)).fetchone()[0]
     if review["brief_version"] < current:
         return "outdated"
-    taken = connection.execute(
-        "SELECT 1 FROM image_reviews WHERE product_sku = ? AND brief_version = ? AND state = 'approved'",
-        (review["product_sku"], review["brief_version"]),
-    ).fetchone()
-    if taken:
-        return "sibling_approved"
+    # database() is BEGIN IMMEDIATE, so no other writer can approve between this count and the update.
+    if approved_count(connection, review["product_sku"], review["brief_version"]) >= MAX_APPROVED_PER_BRIEF:
+        return "approval_limit"
     now = _now()
-    try:  # The unique index is the backstop if two approvals race.
-        connection.execute(
-            "UPDATE image_reviews SET state = 'approved', approved_by = ?, approved_at = ?, updated_at = ? "
-            "WHERE image_id = ? AND state = 'awaiting_approval'", (user_id, now, now, image_id),
-        )
-    except sqlite3.IntegrityError:
-        return "sibling_approved"
+    connection.execute(
+        "UPDATE image_reviews SET state = 'approved', approved_by = ?, approved_at = ?, updated_at = ? "
+        "WHERE image_id = ? AND state = 'awaiting_approval'", (user_id, now, now, image_id),
+    )
     return "approved"

@@ -242,6 +242,26 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(results, [2])
 
+    def test_version_1_database_is_upgraded_to_allow_several_approvals(self):
+        from backend.repositories import reviews
+        with database() as connection:
+            save_product(connection, product())
+            first, second = (save_generated_image(connection, "VASE-001", product(), f"{n}.png", version=n)["id"] for n in (1, 2))
+            for image_id in (first, second):
+                reviews.record_post(connection, image_id, "C1", "100.0", "100.1", "F0")
+            reviews.approve(connection, first, "UELLIE")
+            # As version 1 was: one approval per product and brief.
+            connection.execute("CREATE UNIQUE INDEX image_reviews_one_approved_per_brief "
+                               "ON image_reviews(product_sku, brief_version) WHERE state = 'approved'")
+            connection.execute("PRAGMA user_version = 1")
+        with database() as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'image_reviews_one_approved_per_brief'").fetchone())
+            self.assertEqual(reviews.get_review(connection, first)["state"], "approved")  # Rows are kept.
+            self.assertEqual(reviews.approve(connection, second, "UELLIE"), "approved")
+            self.assertEqual(reviews.approved_count(connection, "VASE-001", 1), 2)
+
     def test_refuses_unknown_schema_version_without_modifying_it(self):
         with sqlite3.connect(self.path) as connection:
             connection.execute("PRAGMA user_version = 99")
