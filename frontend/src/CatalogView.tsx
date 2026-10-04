@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { canSelect, latestBatch, notSelected, productStage, type Catalog, type CatalogRow, type GeneratedImage, type Stage } from './catalogApi'
+import { canSelect, notSelected, productStage, rowImages, type Catalog, type CatalogRow, type GeneratedImage, type Stage } from './catalogApi'
 import ImageLightbox from './ImageLightbox'
 import { money, NextStep, StageLabel, type Actions } from './NextStep'
 
@@ -7,7 +7,7 @@ const SORT: Stage[] = ['approved', 'saving', 'post_failed', 'failed', 'ready', '
 
 const TABS: { id: string; label: string; stages: Stage[] | null; hint: string }[] = [
   { id: 'all', label: 'All', stages: null, hint: 'Each row shows only its next step. Tick products to generate several at once.' },
-  { id: 'generate', label: 'To generate', stages: ['ready', 'failed'], hint: 'Nothing is generated until you click. Each product gets 2 candidates, posted to its Slack thread when ready.' },
+  { id: 'generate', label: 'To generate', stages: ['ready', 'failed'], hint: 'Nothing is generated until you click. Each product gets 4 candidates, posted to its Slack thread when ready.' },
   { id: 'generating', label: 'Generating', stages: ['generating'], hint: 'Candidates appear in the row as soon as each one finishes, then go to Slack.' },
   { id: 'post', label: 'Not posted', stages: ['post_failed'], hint: 'These candidates didn’t reach Slack. Retry posts them to the product’s thread.' },
   { id: 'ellie', label: 'With Ellie', stages: ['with_ellie'], hint: 'Team comments in Slack are advisory. Ellie’s Approve updates this page.' },
@@ -17,8 +17,8 @@ const TABS: { id: string; label: string; stages: Stage[] | null; hint: string }[
 ]
 
 function Thumbnails({ row, perRequest, open }: { row: CatalogRow; perRequest: number; open: (image: GeneratedImage) => void }) {
-  // Only the newest candidates fit the row; earlier ones stay one click away in the image view.
-  const batch = latestBatch(row, perRequest).sort((a, b) => a.version - b.version)
+  // The newest batch and the current attributes' other candidates; older ones stay one click away in the image view.
+  const batch = rowImages(row, perRequest)
   if (!batch.length) return <span className="muted">None yet</span>
   const name = row.product_name || row.sku
   const earlier = row.images.filter(image => image.image_url && !batch.includes(image)).sort((a, b) => b.version - a.version)
@@ -29,9 +29,8 @@ function Thumbnails({ row, perRequest, open }: { row: CatalogRow; perRequest: nu
       return <div key={image.id} className={`thumb-placeholder ${failed ? 'failed' : ''}`} title={image.error ?? undefined}>{failed ? 'Failed' : image.status === 'processing' ? 'Working' : 'Queued'}</div>
     }
     const approved = image.review?.state === 'approved'
-    const current = image.id === row.approved_image_id
     const passed = notSelected(row, image)
-    const status = approved ? (current ? ', approved' : ', approved earlier') : image.outdated ? ', outdated' : passed ? ', not selected' : ''
+    const status = approved ? (image.outdated ? ', approved earlier' : ', approved') : image.outdated ? ', outdated' : passed ? ', not selected' : ''
     return <button type="button" key={image.id} className={`thumb ${approved ? 'approved' : ''} ${passed || (image.outdated && !approved) ? 'dimmed' : ''}`} onClick={() => open(image)} aria-label={`Enlarge ${label}${status}`}>
       <img src={image.image_url} alt="" loading="lazy" />
       {approved && <span className="thumb-tick" aria-hidden="true">✓</span>}
@@ -54,7 +53,7 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
   const [tab, setTab] = useState('all')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [viewing, setViewing] = useState<{ sku: string; imageId: string } | null>(null)
-  const perRequest = catalog?.generation_config.images_per_request ?? 2
+  const perRequest = catalog?.generation_config.images_per_request ?? 4
   const unit = catalog?.generation_config.est_cost_per_image_usd ?? 0
   const rows = useMemo(() => (catalog?.rows ?? []).map(row => ({ row, stage: productStage(row, perRequest) }))
     .sort((a, b) => SORT.indexOf(a.stage) - SORT.indexOf(b.stage) || a.row.sku.localeCompare(b.row.sku)), [catalog, perRequest])
@@ -74,6 +73,7 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
   const selectable = visible.filter(item => canSelect(item.row)).map(item => item.row.sku)
   const sendable = catalog.rows.filter(row => row.can_send).map(row => row.sku)
   const deliverable = catalog.rows.filter(row => row.can_deliver).map(row => row.sku)
+  const unsaved = catalog.rows.filter(row => row.can_deliver).reduce((sum, row) => sum + row.unsaved_image_ids.length, 0)
   const finished = catalog.rows.reduce((total, row) => total + row.images.filter(image => image.status === 'done').length, 0)
   const images = selected.size * perRequest
   const viewingRow = viewing && catalog.rows.find(row => row.sku === viewing.sku)
@@ -94,7 +94,7 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
     <div className="page-head">
       <div>
         <h1 className="page-title">Product catalog</h1>
-        <p className="page-sub">{catalog.total_rows} products · {catalog.with_shot_idea} with a Shot Idea · 1 approved image needed per product</p>
+        <p className="page-sub">{catalog.total_rows} products · {catalog.with_shot_idea} with a Shot Idea · 1–3 approved images per product</p>
       </div>
       <div className="head-actions">
         <div className="spend" title={`Estimate: finished images × ${money(unit)} each (upper end of Luma’s published price)`}>
@@ -126,7 +126,7 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
           {current.id === 'post' && sendable.length > 0 &&
             <button type="button" className="primary-button" disabled={actions.sending} onClick={() => { if (window.confirm(`Retry posting ${sendable.length} product${sendable.length === 1 ? '' : 's'} to Slack?`)) actions.send(sendable) }}>{actions.sending ? 'Posting…' : `Retry posting all ${sendable.length}`}</button>}
           {current.id === 'drive' && deliverable.length > 0 &&
-            <button type="button" className="primary-button" disabled={actions.saving} onClick={() => actions.deliver(deliverable, `Save ${deliverable.length} approved image${deliverable.length === 1 ? '' : 's'} to your Google Drive?`)}>{actions.saving ? 'Saving…' : `Save all ${deliverable.length} to Drive`}</button>}
+            <button type="button" className="primary-button" disabled={actions.saving} onClick={() => actions.deliver(deliverable, `Save ${unsaved} approved image${unsaved === 1 ? '' : 's'} to your Google Drive?`)}>{actions.saving ? 'Saving…' : `Save all ${deliverable.length} to Drive`}</button>}
         </>}
       </div>
 

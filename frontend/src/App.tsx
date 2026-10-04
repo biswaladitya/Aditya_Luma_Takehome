@@ -79,7 +79,7 @@ export default function App() {
 
   async function applied(result: CatalogPreview) {
     choosePreview(null)
-    const outdated = result.rows.filter(row => row.brief_case === 'with_ellie').length
+    const outdated = result.rows.filter(row => row.brief_case === 'with_ellie' || row.candidates_outdated).length
     setBanner(`${result.changed_count} changed, ${result.new_count} new from ${result.filename}.${outdated ? ` Candidates for ${plural(outdated, 'product')} are now outdated.` : ''}`)
     setView('catalog')
     await refresh().catch(cause => setLoadError(cause instanceof Error ? cause.message : 'Could not load the catalog.'))

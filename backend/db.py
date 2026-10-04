@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _absolute_path(value: str) -> Path:
@@ -86,8 +86,8 @@ _SCHEMA = (
         CHECK ((status = 'pending' AND applied_at IS NULL AND result IS NULL)
             OR (status = 'applied' AND applied_at IS NOT NULL AND result IS NOT NULL))
     )""",
-    # Slack review of a posted candidate. Rows exist only once the post succeeded; the database allows
-    # one approval per product and brief version. See persistence.md.
+    # Slack review of a posted candidate. Rows exist only once the post succeeded. The approval limit
+    # per product and brief version is enforced by reviews.approve, not here. See persistence.md.
     """CREATE TABLE image_reviews (
         image_id TEXT PRIMARY KEY NOT NULL REFERENCES generated_images(id) ON DELETE RESTRICT,
         product_sku TEXT NOT NULL REFERENCES products(sku) ON DELETE RESTRICT,
@@ -104,8 +104,6 @@ _SCHEMA = (
         CHECK (state = 'awaiting_approval' OR (approved_by IS NOT NULL AND approved_at IS NOT NULL))
     )""",
     "CREATE INDEX image_reviews_product_sku ON image_reviews(product_sku)",
-    "CREATE UNIQUE INDEX image_reviews_one_approved_per_brief ON image_reviews(product_sku, brief_version) "
-    "WHERE state = 'approved'",
     """CREATE TRIGGER image_reviews_forward_only
         BEFORE UPDATE OF state ON image_reviews
         WHEN NEW.state IS NOT OLD.state
@@ -140,10 +138,18 @@ _SCHEMA = (
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
-    """Create the schema in an empty database. There are no upgrades: an older database is refused."""
+    """Create the schema in an empty database, or apply the one upgrade (1 to 2); other versions are refused."""
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if version == SCHEMA_VERSION:
         return
+    if version == 1:  # Version 2 allows several approvals per brief: only the unique index goes, rows are kept.
+        connection.execute("DROP INDEX IF EXISTS image_reviews_one_approved_per_brief")
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        return
+    if version > SCHEMA_VERSION:  # An older build after a rollback: the data is fine, the code is behind.
+        raise RuntimeError(
+            f"Unsupported catalog schema version: {version}. {database_path()} was written by a newer version "
+            "of the app; deploy that version, or restore a backup taken before the upgrade.")
     if version != 0:
         raise RuntimeError(
             f"Unsupported catalog schema version: {version}. Delete {database_path()} to start a fresh catalog.")

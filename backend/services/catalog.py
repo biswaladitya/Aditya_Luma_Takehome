@@ -11,6 +11,7 @@ from litestar.exceptions import HTTPException
 from backend.db import data_directory, database
 from backend.repositories import products
 from backend.repositories.products import BRIEF_ATTRIBUTES
+from backend.repositories.reviews import MAX_APPROVED_PER_BRIEF, MIN_APPROVED_PER_BRIEF
 
 COLUMNS = {
     "SKU": "sku", "Product Name": "product_name", "Category": "category",
@@ -20,7 +21,9 @@ COLUMNS = {
 ATTRIBUTES = tuple(COLUMNS.values())
 REQUIRED_COLUMNS = tuple(COLUMNS)
 MAX_CSV_BYTES = 5 * 1024 * 1024
-IMAGES_PER_REQUEST = 2
+IMAGES_PER_REQUEST = 4
+MAX_IMAGES_PER_BRIEF = 12  # ASSUMPTIONS.md: attempt cap, per brief version
+MAX_ATTEMPTS_PER_BRIEF = 2 * MAX_IMAGES_PER_BRIEF  # More options only: failed attempts count here
 # Upper end of Luma's published uni-1 reference-image price range (USD per image).
 EST_COST_PER_IMAGE_USD = 0.0644
 GENERATION_STATUSES = (
@@ -149,6 +152,17 @@ def product_view(row: dict) -> dict:
     result.update(review_summary(result["images"]))
     result.update(delivery_summary(done))
     result["can_generate"] = status in ELIGIBLE and not result["generating"] and not result["delivering"]
+    # Failed attempts don't count against the cap; outdated images belong to an earlier brief's count.
+    result["images_used"] = sum(image["status"] != "failed" and not image["outdated"] for image in result["images"])
+    result["cap_reached"] = result["images_used"] + IMAGES_PER_REQUEST > MAX_IMAGES_PER_BRIEF
+    # More options is also bounded counting failures, or a failing Luma could be retried from Slack forever.
+    attempts = sum(not image["outdated"] for image in result["images"])
+    result["attempts_exhausted"] = attempts + IMAGES_PER_REQUEST > MAX_ATTEMPTS_PER_BRIEF
+    # More options: another batch for a brief that already has candidates and can still take an approval.
+    result["more_options_open"] = (
+        status == "already_generated" and not result["approval_limit_reached"]
+        and not result["cap_reached"] and not result["attempts_exhausted"])
+    result["can_request_more"] = result["more_options_open"] and not result["generating"] and not result["delivering"]
     return result
 
 
@@ -160,27 +174,34 @@ def review_summary(images: list[dict]) -> dict:
     """Derive review state from the images; nothing is stored on the product.
 
     A generation's candidates stay queued/processing until they are posted, so "generating" covers posting.
+    Approvals are counted for the current brief only: review is "approved" (ready for Drive) at
+    MIN_APPROVED_PER_BRIEF and closed at MAX_APPROVED_PER_BRIEF; until then more can be posted and approved.
     """
     current = [image for image in images if not image["outdated"]]
     approved = sorted((image for image in images if (image["review"] or {}).get("state") == "approved"),
                       key=lambda image: image["review"]["approved_at"])
     states = {image["review"]["state"] for image in current if image["review"]}
+    count = sum(not image["outdated"] for image in approved)
+    full = count >= MAX_APPROVED_PER_BRIEF
     generating = any(image["status"] in ACTIVE for image in images)
     # Done candidates for the current brief that never reached Slack; Retry posting sends them.
     unposted = [image for image in current if image["status"] == "done" and image["review"] is None]
     return {
         "generating": generating,
-        "review_status": "approved" if "approved" in states else "awaiting_approval" if states else None,
+        "review_status": "approved" if count >= MIN_APPROVED_PER_BRIEF else "awaiting_approval" if states else None,
+        "approved_count": count,
+        "approvals_max": MAX_APPROVED_PER_BRIEF,
+        "approval_limit_reached": full,
         "approved_image_id": approved[-1]["id"] if approved else None,
         "approved_image_ids": [image["id"] for image in approved],
         "post_error": next((image["post_error"] for image in unposted if image["post_error"]), None),
-        "reviewable_image_ids": [] if "approved" in states else [image["id"] for image in unposted],
-        "can_send": bool(unposted) and "approved" not in states and not generating,
+        "reviewable_image_ids": [] if full else [image["id"] for image in unposted],
+        "can_send": bool(unposted) and not full and not generating,
     }
 
 
 def delivery_summary(done: list[dict]) -> dict:
-    """Derive Drive state over every approved image; nothing is stored on the product."""
+    """Derive Drive state over every approved image, of any brief; nothing is stored on the product."""
     approved = sorted((image for image in done if (image["review"] or {}).get("state") == "approved"),
                       key=lambda image: image["review"]["approved_at"])
     pending = [image["delivery"] for image in approved if (image["delivery"] or {}).get("state") == "pending"]
@@ -193,6 +214,7 @@ def delivery_summary(done: list[dict]) -> dict:
         "delivery_error": next((delivery["error"] for delivery in pending if delivery["error"]), None),
         "drive_url": delivered[-1]["drive_url"] if delivered else None,
         "delivering": delivering,
+        "unsaved_image_ids": [image["id"] for image in unsaved],
         "can_deliver": bool(unsaved) and not delivering,
     }
 

@@ -56,10 +56,17 @@ export type CatalogRow = {
   /** A generation, including posting its candidates to Slack, is running. */
   generating: boolean
   can_generate: boolean
-  /** For the current brief. */
+  /** Non-failed images of the current brief, counted against the per-brief cap. */
+  images_used: number
+  /** More options in Slack would be accepted: current-brief candidates, under the approval limit and the cap. */
+  can_request_more: boolean
+  /** For the current brief; 'approved' from the first approval, though more can follow until the limit. */
   review_status: ReviewState | null
-  /** The newest approved image; older approvals stay in approved_image_ids. */
-  approved_image_id: string | null
+  /** Approved images of the current brief, out of approvals_max. */
+  approved_count: number
+  approvals_max: number
+  /** The current brief has all the approvals it can take: its other candidates are not selected. */
+  approval_limit_reached: boolean
   approved_image_ids: string[]
   post_error: string | null
   /** Has current-brief candidates that never reached Slack: Retry posting. */
@@ -69,6 +76,10 @@ export type CatalogRow = {
   drive_url: string | null
   delivering: boolean
   can_deliver: boolean
+  /** Approved images that Save to Drive would write now. */
+  unsaved_image_ids: string[]
+  /** Import review only: waiting candidates that accepting this row makes Outdated. */
+  candidates_outdated?: number
 }
 
 export type Catalog = {
@@ -143,19 +154,31 @@ export function deliverToDrive(skus: string[], accessToken: string): Promise<Del
 export const isDelivering = (row: CatalogRow) => row.delivering
 
 /** Rows whose Slack state can change without user action (Ellie's decision). */
-export const isInReview = (row: CatalogRow) => row.review_status === 'awaiting_approval'
+/** Ellie can still decide something, which includes a product already approved once: keep polling. */
+export const isInReview = (row: CatalogRow) => row.review_status === 'awaiting_approval' || awaitingCount(row) > 0
 
 export const isGenerating = (row: CatalogRow) => row.generating
 /** Ready products, or an optional regenerate after a brief change; never while generating, posting or saving. */
 export const canSelect = (row: CatalogRow) => row.can_generate
 
-/** An image is "not selected" when Ellie approved another candidate made from the same brief. */
+/** An image is "not selected" once its brief has all the approvals it can take and it isn't one of them. */
 export const notSelected = (row: CatalogRow, image: GeneratedImage) => image.review?.state !== 'approved'
-  && row.images.some(other => other.review?.state === 'approved' && other.brief_version === image.brief_version)
+  && !image.outdated && row.approval_limit_reached
+
+/** Current-brief candidates in Slack that Ellie can still approve. */
+export const awaitingCount = (row: CatalogRow) => row.approval_limit_reached ? 0
+  : row.images.filter(image => !image.outdated && image.review?.state === 'awaiting_approval').length
 
 /** The most recent request's candidates: the newest `perRequest` images by version. */
 export function latestBatch(row: CatalogRow, perRequest: number) {
   return [...row.images].sort((a, b) => b.version - a.version).slice(0, perRequest)
+}
+
+/** The row's thumbnails: the newest batch plus every earlier candidate of the current brief, which
+ * More options leaves approvable. Oldest first. */
+export function rowImages(row: CatalogRow, perRequest: number) {
+  const batch = latestBatch(row, perRequest)
+  return row.images.filter(image => batch.includes(image) || (image.image_url && !image.outdated)).sort((a, b) => a.version - b.version)
 }
 
 export type BatchProgress = { total: number; finished: number; failed: number; active: boolean }

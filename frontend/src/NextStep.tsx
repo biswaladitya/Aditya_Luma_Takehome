@@ -1,4 +1,4 @@
-import { batchProgress, latestBatch, type CatalogRow, type Stage } from './catalogApi'
+import { awaitingCount, batchProgress, latestBatch, type CatalogRow, type Stage } from './catalogApi'
 
 export type Actions = {
   generate: (skus: string[]) => Promise<boolean>
@@ -31,6 +31,13 @@ export function StageLabel({ stage }: { stage: Stage }) {
   </div>
 }
 
+/** One approval is enough for Drive, so say how many there are and whether Ellie can still add to them. */
+function Approvals({ row }: { row: CatalogRow }) {
+  if (!row.approved_count) return null
+  const waiting = awaitingCount(row)
+  return <p className="step-sub left">{row.approved_count} of {row.approvals_max} approved{waiting > 0 && ` · ${waiting} more waiting on Ellie`}</p>
+}
+
 /** After a brief change, approved and In Drive products keep their images; a new one is optional. */
 function Regenerate({ row, name, actions }: { row: CatalogRow; name: string; actions: Actions }) {
   if (!row.brief_changed || !row.can_generate) return null
@@ -49,6 +56,7 @@ export function NextStep({ row, stage, perRequest, unit, actions }: { row: Catal
     case 'in_drive':
       return <div>
         <div className="step-text step-green">Saved</div>{row.drive_url && <a href={row.drive_url} target="_blank" rel="noreferrer">Open in Drive ↗</a>}
+        <Approvals row={row} />
         <Regenerate row={row} name={name} actions={actions} />
       </div>
     case 'saving':
@@ -58,6 +66,7 @@ export function NextStep({ row, stage, perRequest, unit, actions }: { row: Catal
         <button type="button" className="primary-button block" disabled={actions.saving} onClick={() => actions.deliver([row.sku])}
           aria-label={`${row.delivery_error ? 'Retry save' : 'Save to Drive'}: ${name}`}>{row.delivery_error ? 'Retry save' : 'Save to Drive'}</button>
         {row.delivery_error && <p className="step-error">{row.delivery_error}</p>}
+        <Approvals row={row} />
         {/* An earlier brief's approval takes the row's stage; a newer brief's failures still need their retry. */}
         {row.can_send && <>
           <button type="button" className="outline-button danger block" disabled={actions.sending} onClick={() => actions.send([row.sku])} aria-label={`Retry posting: ${name}`}>Retry posting</button>
@@ -67,7 +76,15 @@ export function NextStep({ row, stage, perRequest, unit, actions }: { row: Catal
         <Regenerate row={row} name={name} actions={actions} />
       </div>
     case 'with_ellie':
-      return <div className="step-text step-blue">Waiting on Ellie</div>
+      return <div>
+        <div className="step-text step-blue">Waiting on Ellie</div>
+        {/* After More options, earlier candidates keep the row here; the newer batch's failures still show. */}
+        {row.can_send && <>
+          <button type="button" className="outline-button danger block" disabled={actions.sending} onClick={() => actions.send([row.sku])} aria-label={`Retry posting: ${name}`}>Retry posting</button>
+          <p className="step-error">{row.post_error || 'Not posted to Slack yet.'}</p>
+        </>}
+        {failed.length > 0 && <p className="step-error">{failed.length} failed: {failed[0].error || 'Generation failed.'}</p>}
+      </div>
     case 'generating': {
       const progress = batchProgress([row], perRequest)
       const percent = progress.total ? Math.max(Math.round(progress.finished / progress.total * 100), 6) : 6
