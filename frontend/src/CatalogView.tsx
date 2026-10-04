@@ -1,20 +1,22 @@
 import { useEffect, useMemo, useState } from 'react'
-import { canSelect, notSelected, productStage, rowImages, type Catalog, type CatalogRow, type GeneratedImage, type Stage } from './catalogApi'
+import { canSelect, notSelected, rowImages, type Catalog, type CatalogRow, type GeneratedImage, type Stage } from './catalogApi'
 import ImageLightbox from './ImageLightbox'
 import { money, NextStep, StageLabel, type Actions } from './NextStep'
 
 const SORT: Stage[] = ['approved', 'saving', 'post_failed', 'failed', 'ready', 'generating', 'with_ellie', 'in_drive', 'needs_input']
 
-const TABS: { id: string; label: string; stages: Stage[] | null; hint: string }[] = [
-  { id: 'all', label: 'All', stages: null, hint: 'Each row shows only its next step. Tick products to generate several at once.' },
-  { id: 'generate', label: 'To generate', stages: ['ready', 'failed'], hint: 'Nothing is generated until you click. Each product gets 4 candidates, posted to its Slack thread when ready.' },
-  { id: 'generating', label: 'Generating', stages: ['generating'], hint: 'Candidates appear in the row as soon as each one finishes, then go to Slack.' },
-  { id: 'post', label: 'Not posted', stages: ['post_failed'], hint: 'These candidates didn’t reach Slack. Retry posts them to the product’s thread.' },
-  { id: 'ellie', label: 'With Ellie', stages: ['with_ellie'], hint: 'Team comments in Slack are advisory. Ellie’s Approve updates this page.' },
-  { id: 'drive', label: 'To Drive', stages: ['approved', 'saving'], hint: 'Saves every approved image not yet in Drive to the top of your My Drive as SKU_styled_vN.' },
-  { id: 'done', label: 'In Drive', stages: ['in_drive'], hint: 'Approved images already saved to Drive.' },
-  { id: 'input', label: 'Missing attributes', stages: ['needs_input'], hint: 'Add a Shot Idea and a source photo to these rows in the CSV, then import it again.' },
-]
+const ALL = 'all'
+// The tabs themselves (labels, stages, counts) come from the backend; only the hint text lives here.
+const HINTS: Record<string, string> = {
+  [ALL]: 'Each row shows only its next step. Tick products to generate several at once.',
+  generate: 'Nothing is generated until you click. Each product gets 4 candidates, posted to its Slack thread when ready.',
+  generating: 'Candidates appear in the row as soon as each one finishes, then go to Slack.',
+  post: 'These candidates didn’t reach Slack. Retry posts them to the product’s thread.',
+  ellie: 'Team comments in Slack are advisory. Ellie’s Approve updates this page.',
+  drive: 'Saves every approved image not yet in Drive to the top of your My Drive as SKU_styled_vN.',
+  done: 'Approved images already saved to Drive.',
+  input: 'Add a Shot Idea and a source photo to these rows in the CSV, then import it again.',
+}
 
 function Thumbnails({ row, perRequest, open }: { row: CatalogRow; perRequest: number; open: (image: GeneratedImage) => void }) {
   // The newest batch and the current attributes' other candidates; older ones stay one click away in the image view.
@@ -50,13 +52,13 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
   onDismissNotice: () => void
   onImport: () => void
 }) {
-  const [tab, setTab] = useState('all')
+  const [tab, setTab] = useState(ALL)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [viewing, setViewing] = useState<{ sku: string; imageId: string } | null>(null)
   const perRequest = catalog?.generation_config.images_per_request ?? 4
   const unit = catalog?.generation_config.est_cost_per_image_usd ?? 0
-  const rows = useMemo(() => (catalog?.rows ?? []).map(row => ({ row, stage: productStage(row, perRequest) }))
-    .sort((a, b) => SORT.indexOf(a.stage) - SORT.indexOf(b.stage) || a.row.sku.localeCompare(b.row.sku)), [catalog, perRequest])
+  const rows = useMemo(() => (catalog?.rows ?? []).map(row => ({ row, stage: row.stage }))
+    .sort((a, b) => SORT.indexOf(a.stage) - SORT.indexOf(b.stage) || a.row.sku.localeCompare(b.row.sku)), [catalog])
 
   // Drop selections that stopped being eligible after a reload or a finished job.
   useEffect(() => {
@@ -67,8 +69,9 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
 
   if (!catalog) return <main className="page"><p role="status">Loading catalog…</p></main>
 
-  const current = TABS.find(item => item.id === tab) ?? TABS[0]
-  const count = (stages: Stage[] | null) => stages ? rows.filter(item => stages.includes(item.stage)).length : rows.length
+  const tabs: { id: string; label: string; stages: Stage[] | null; count: number }[] =
+    [{ id: ALL, label: 'All', stages: null, count: catalog.total_rows }, ...catalog.tabs]
+  const current = tabs.find(item => item.id === tab) ?? tabs[0]
   const visible = current.stages ? rows.filter(item => current.stages!.includes(item.stage)) : rows
   const selectable = visible.filter(item => canSelect(item.row)).map(item => item.row.sku)
   const sendable = catalog.rows.filter(row => row.can_send).map(row => row.sku)
@@ -109,8 +112,8 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
 
     {!catalog.total_rows ? <div className="empty-state">Import a CSV to create your catalog. <button type="button" className="link-button" onClick={onImport}>Import CSV</button></div> : <>
       <nav className="tabs" aria-label="Filter by stage">
-        {TABS.map(item => <button type="button" key={item.id} aria-pressed={item.id === current.id} onClick={() => setTab(item.id)}>
-          {item.label} <span className="tab-count">{count(item.stages)}</span>
+        {tabs.map(item => <button type="button" key={item.id} aria-pressed={item.id === current.id} onClick={() => setTab(item.id)}>
+          {item.label} <span className="tab-count">{item.count}</span>
         </button>)}
       </nav>
 
@@ -120,8 +123,8 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
           <button type="button" className="ghost-button" onClick={() => setSelected(new Set())}>Clear</button>
           <button type="button" className="accent-button" disabled={actions.generating} onClick={() => void generateSelected()}>{actions.generating ? 'Starting…' : `Generate ${images} images`}</button>
         </div> : <>
-          <p className="grow hint">{current.hint}</p>
-          {(current.id === 'all' || current.id === 'generate') && selectable.length > 0 &&
+          <p className="grow hint">{HINTS[current.id]}</p>
+          {(current.id === ALL || current.id === 'generate') && selectable.length > 0 &&
             <button type="button" className="secondary-button" disabled={actions.generating} onClick={() => setSelected(new Set(selectable))}>Select all {selectable.length} to generate</button>}
           {current.id === 'post' && sendable.length > 0 &&
             <button type="button" className="primary-button" disabled={actions.sending} onClick={() => { if (window.confirm(`Retry posting ${sendable.length} product${sendable.length === 1 ? '' : 's'} to Slack?`)) actions.send(sendable) }}>{actions.sending ? 'Posting…' : `Retry posting all ${sendable.length}`}</button>}

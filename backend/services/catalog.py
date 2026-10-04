@@ -31,6 +31,16 @@ GENERATION_STATUSES = (
 )
 ELIGIBLE = ("never_generated", "changed_since_generation")
 ACTIVE = ("queued", "processing")
+# The dashboard's tabs, in order: (id, label, stages). Every stage belongs to exactly one tab.
+TABS = (
+    ("generate", "To generate", ("ready", "failed")),
+    ("generating", "Generating", ("generating",)),
+    ("post", "Not posted", ("post_failed",)),
+    ("ellie", "With Ellie", ("with_ellie",)),
+    ("drive", "To Drive", ("approved", "saving")),
+    ("done", "In Drive", ("in_drive",)),
+    ("input", "Missing attributes", ("needs_input",)),
+)
 
 
 def attributes(row: dict) -> dict:
@@ -163,7 +173,29 @@ def product_view(row: dict) -> dict:
         status == "already_generated" and not result["approval_limit_reached"]
         and not result["cap_reached"] and not result["attempts_exhausted"])
     result["can_request_more"] = result["more_options_open"] and not result["generating"] and not result["delivering"]
+    result["stage"] = product_stage(result)
     return result
+
+
+def product_stage(view: dict) -> str:
+    """The one next step for a product (state_machine_plan.md). Order matters: the first match wins."""
+    if view["generating"]:
+        return "generating"
+    if view["delivering"]:
+        return "saving"
+    if view["can_deliver"]:
+        return "approved"
+    if view["review_status"] == "awaiting_approval":
+        return "with_ellie"
+    if view["can_send"]:
+        return "post_failed"
+    # The most recent request's candidates: the newest IMAGES_PER_REQUEST images by version.
+    batch = sorted(view["images"], key=lambda image: image["version"], reverse=True)[:IMAGES_PER_REQUEST]
+    if view["can_generate"] and any(image["status"] == "failed" for image in batch):
+        return "failed"
+    if view["delivery_status"] == "delivered":
+        return "in_drive"
+    return "ready" if view["can_generate"] else "needs_input"
 
 
 def brief_changes(before: dict, after: dict) -> dict:
@@ -232,6 +264,11 @@ def summarize(rows: list[dict]) -> dict:
             status: sum(row["generation_status"] == status for row in rows)
             for status in GENERATION_STATUSES
         },
+        "tabs": [
+            {"id": tab, "label": label, "stages": list(stages),
+             "count": sum(row.get("stage") in stages for row in rows)}  # Previews saved before stages have none.
+            for tab, label, stages in TABS
+        ],
     }
 
 
