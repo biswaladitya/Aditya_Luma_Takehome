@@ -1,10 +1,11 @@
-"""Slack review endpoint. Sending happens only on an explicit request."""
+"""Slack endpoints: review posts and the status report. Sending happens only on an explicit request."""
 
 from dataclasses import dataclass
 
 from litestar import post
 
 from backend.services.review import start_review
+from backend.services.status_report import send_report
 
 
 @dataclass
@@ -18,4 +19,10 @@ def send_for_review(data: ReviewRequest) -> dict:
     return start_review(data.skus)
 
 
-review_routes = [send_for_review]
+@post("/api/status-report", status_code=200, sync_to_thread=True)
+def send_status_report() -> dict:
+    """Post the dashboard's tabs and spend to the Slack status channel now."""
+    return send_report()
+
+
+review_routes = [send_for_review, send_status_report]

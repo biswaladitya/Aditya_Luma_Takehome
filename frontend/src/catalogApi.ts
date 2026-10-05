@@ -96,10 +96,13 @@ export type Catalog = {
   generation_summary: Record<GenerationStatus, number>
   generation_config: { images_per_request: number; est_cost_per_image_usd: number }
   tabs: StageTab[]
+  /** Running estimate over every image Luma returned; the Slack report reads the same figure. */
+  spend: { images: number; est_cost_usd: number }
   rows: CatalogRow[]
 }
 
-export type CatalogPreview = Catalog & {
+/** An import preview covers only the CSV's rows, so it has no catalog-wide tabs or spend. */
+export type CatalogPreview = Omit<Catalog, 'tabs' | 'spend'> & {
   preview_id: string
   filename: string
   status: 'pending' | 'applied'
@@ -145,6 +148,11 @@ export function sendForReview(skus: string[]): Promise<ReviewResult> {
   return catalogRequest('/api/reviews', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skus }),
   })
+}
+
+/** Posts the tabs and spend shown here to the Slack status channel. Nothing is generated. */
+export function sendStatusReport(): Promise<{ sent: boolean; products: number }> {
+  return catalogRequest('/api/status-report', { method: 'POST' })
 }
 
 export type DeliveryResult = { queued: string[]; skipped: { sku: string; reason: string }[] }

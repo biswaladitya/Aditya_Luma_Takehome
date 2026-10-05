@@ -43,14 +43,16 @@ function Thumbnails({ row, perRequest, open }: { row: CatalogRow; perRequest: nu
   </div>
 }
 
-export default function CatalogView({ catalog, actions, banner, onDismissBanner, notice, onDismissNotice, onImport }: {
+export default function CatalogView({ catalog, actions, banner, onDismissBanner, notice, onDismissNotice, onImport, onSendStatus, sendingStatus }: {
   catalog: Catalog | null
   actions: Actions
-  banner: string
+  banner: { title: string; text: string } | null
   onDismissBanner: () => void
   notice: string
   onDismissNotice: () => void
   onImport: () => void
+  onSendStatus: () => void
+  sendingStatus: boolean
 }) {
   const [tab, setTab] = useState(ALL)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -77,7 +79,7 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
   const sendable = catalog.rows.filter(row => row.can_send).map(row => row.sku)
   const deliverable = catalog.rows.filter(row => row.can_deliver).map(row => row.sku)
   const unsaved = catalog.rows.filter(row => row.can_deliver).reduce((sum, row) => sum + row.unsaved_image_ids.length, 0)
-  const finished = catalog.rows.reduce((total, row) => total + row.images.filter(image => image.status === 'done').length, 0)
+  const spend = catalog.spend
   const images = selected.size * perRequest
   const viewingRow = viewing && catalog.rows.find(row => row.sku === viewing.sku)
 
@@ -91,7 +93,7 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
 
   return <main className="page page-wide">
     {banner && <div className="banner" role="status">
-      <span aria-hidden="true">✓</span><span className="grow"><strong>Catalog updated.</strong> {banner}</span>
+      <span aria-hidden="true">✓</span><span className="grow"><strong>{banner.title}</strong> {banner.text}</span>
       <button type="button" className="icon-button" aria-label="Dismiss" onClick={onDismissBanner}>✕</button>
     </div>}
     <div className="page-head">
@@ -100,10 +102,11 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
         <p className="page-sub">{catalog.total_rows} products · {catalog.with_shot_idea} with a Shot Idea · 1–3 approved images per product</p>
       </div>
       <div className="head-actions">
-        <div className="spend" title={`Estimate: finished images × ${money(unit)} each (upper end of Luma’s published price)`}>
+        <div className="spend" title={`Estimate: images Luma returned × ${money(unit)} each (upper end of Luma’s published price)`}>
           <div className="spend-label">GENERATION SPEND · ESTIMATE</div>
-          <div className="spend-value"><strong>{finished} image{finished === 1 ? '' : 's'}</strong> · about {money(finished * unit)}</div>
+          <div className="spend-value"><strong>{spend.images} image{spend.images === 1 ? '' : 's'}</strong> · about {money(spend.est_cost_usd)}</div>
         </div>
+        <button type="button" className="secondary-button" disabled={sendingStatus} title="Posts these tabs and the spend to the Slack status channel" onClick={onSendStatus}>{sendingStatus ? 'Sending…' : 'Send status to Slack'}</button>
         <button type="button" className="secondary-button" onClick={onImport}>↑ Import CSV</button>
       </div>
     </div>

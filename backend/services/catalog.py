@@ -251,6 +251,12 @@ def delivery_summary(done: list[dict]) -> dict:
     }
 
 
+def spend_total(rows: list[dict]) -> dict:
+    """Estimated generation spend: every image Luma returned, whatever happened to it afterwards."""
+    images = sum(image["luma_generation_id"] is not None for row in rows for image in row.get("images", []))
+    return {"images": images, "est_cost_usd": round(images * EST_COST_PER_IMAGE_USD, 4)}
+
+
 def summarize(rows: list[dict]) -> dict:
     with_idea = sum(bool(row["shot_idea"]) for row in rows)
     return {
@@ -264,20 +270,21 @@ def summarize(rows: list[dict]) -> dict:
             status: sum(row["generation_status"] == status for row in rows)
             for status in GENERATION_STATUSES
         },
-        "tabs": [
-            {"id": tab, "label": label, "stages": list(stages),
-             "count": sum(row.get("stage") in stages for row in rows)}  # Previews saved before stages have none.
-            for tab, label, stages in TABS
-        ],
     }
 
 
 def get_catalog(*, candidates_only: bool = False) -> dict:
     with database() as connection:
         rows = [product_view(row) for row in products.get_products(connection)]
+    # Tabs and spend describe the whole catalog, also when only the candidates are listed.
+    status = {
+        "tabs": [{"id": tab, "label": label, "stages": list(stages),
+                  "count": sum(row["stage"] in stages for row in rows)} for tab, label, stages in TABS],
+        "spend": spend_total(rows),
+    }
     if candidates_only:
         rows = [row for row in rows if row["generation_status"] in ELIGIBLE]
-    return summarize(rows)
+    return {**summarize(rows), **status}
 
 
 def record_generated_image(
