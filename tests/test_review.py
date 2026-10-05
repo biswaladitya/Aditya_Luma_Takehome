@@ -29,6 +29,8 @@ class FakeSlack:
         self.posts, self.updates, self.ephemerals, self.uploads = [], [], [], []
         self.fail_posts = 0
         self.fail_uploads = 0
+        self.fail_permalinks = False
+        self.permalinks = []
 
     def post_message(self, channel, text, blocks=None, thread_ts=None):
         if self.fail_posts:
@@ -36,6 +38,12 @@ class FakeSlack:
             raise RuntimeError("slack is down")
         self.posts.append({"channel": channel, "text": text, "blocks": blocks, "thread_ts": thread_ts})
         return f"100.{len(self.posts)}"
+
+    def permalink(self, channel, ts):
+        if self.fail_permalinks:
+            raise RuntimeError("no permalink")
+        self.permalinks.append((channel, ts))
+        return f"https://slack.test/archives/{channel}/p{ts.replace('.', '')}"
 
     def upload_image(self, path, title, channel, thread_ts):
         if self.fail_uploads:

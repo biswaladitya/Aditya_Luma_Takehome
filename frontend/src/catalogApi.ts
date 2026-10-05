@@ -29,6 +29,10 @@ export type GeneratedImage = {
 /** What accepting an import row does to the product; see state_machine_plan.md. */
 export type BriefCase = 'new' | 'info_only' | 'unchanged' | 'invalid' | 'not_generated' | 'with_ellie' | 'approved_not_in_drive' | 'in_drive'
 
+/** The one next step for a product, decided by the backend (product_stage in catalog.py). */
+export type Stage = 'in_drive' | 'saving' | 'approved' | 'with_ellie' | 'generating' | 'failed' | 'post_failed' | 'ready' | 'needs_input'
+export type StageTab = { id: string; label: string; stages: Stage[]; count: number }
+
 export type CatalogRow = {
   sku: string
   product_name: string
@@ -56,6 +60,7 @@ export type CatalogRow = {
   /** A generation, including posting its candidates to Slack, is running. */
   generating: boolean
   can_generate: boolean
+  stage: Stage
   /** Non-failed images of the current brief, counted against the per-brief cap. */
   images_used: number
   /** More options in Slack would be accepted: current-brief candidates, under the approval limit and the cap. */
@@ -90,10 +95,14 @@ export type Catalog = {
   with_issues: number
   generation_summary: Record<GenerationStatus, number>
   generation_config: { images_per_request: number; est_cost_per_image_usd: number }
+  tabs: StageTab[]
+  /** Running estimate over every image Luma returned; the Slack report reads the same figure. */
+  spend: { images: number; est_cost_usd: number }
   rows: CatalogRow[]
 }
 
-export type CatalogPreview = Catalog & {
+/** An import preview covers only the CSV's rows, so it has no catalog-wide tabs or spend. */
+export type CatalogPreview = Omit<Catalog, 'tabs' | 'spend'> & {
   preview_id: string
   filename: string
   status: 'pending' | 'applied'
@@ -139,6 +148,11 @@ export function sendForReview(skus: string[]): Promise<ReviewResult> {
   return catalogRequest('/api/reviews', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skus }),
   })
+}
+
+/** Posts the tabs and spend shown here to the Slack status channel. Nothing is generated. */
+export function sendStatusReport(): Promise<{ sent: boolean; products: number }> {
+  return catalogRequest('/api/status-report', { method: 'POST' })
 }
 
 export type DeliveryResult = { queued: string[]; skipped: { sku: string; reason: string }[] }
@@ -191,19 +205,4 @@ export function batchProgress(rows: CatalogRow[], perRequest: number): BatchProg
     total: images.length, finished, failed: images.filter(image => image.status === 'failed').length,
     active: images.some(image => image.status === 'queued' || image.status === 'processing'),
   }
-}
-
-export type Stage = 'in_drive' | 'saving' | 'approved' | 'with_ellie' | 'generating' | 'failed' | 'post_failed' | 'ready' | 'needs_input'
-
-/** The one next step for a product (state_machine_plan.md). Order matters: the first match wins. */
-export function productStage(row: CatalogRow, perRequest: number): Stage {
-  if (isGenerating(row)) return 'generating'
-  if (isDelivering(row)) return 'saving'
-  if (row.can_deliver) return 'approved'
-  if (row.review_status === 'awaiting_approval') return 'with_ellie'
-  if (row.can_send) return 'post_failed'
-  if (row.can_generate && latestBatch(row, perRequest).some(image => image.status === 'failed')) return 'failed'
-  if (row.delivery_status === 'delivered') return 'in_drive'
-  if (row.can_generate) return 'ready'
-  return 'needs_input'
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { NextStep, type Actions } from './NextStep'
-import { notSelected, productStage, type CatalogRow, type GeneratedImage } from './catalogApi'
+import { notSelected, type CatalogRow, type GeneratedImage } from './catalogApi'
 
 type Item = { id: string; src: string; caption: string; short: string; image: GeneratedImage | null }
 
@@ -85,7 +85,7 @@ export default function ImageLightbox({ row, imageId, perRequest, unit, actions,
           </button>)}</div>
         </div>
         <div className="lightbox-actions">
-          <NextStep row={row} stage={productStage(row, perRequest)} perRequest={perRequest} unit={unit} actions={actions} />
+          <NextStep row={row} stage={row.stage} perRequest={perRequest} unit={unit} actions={actions} />
           <a href={item.src} target="_blank" rel="noreferrer">Open original in new tab ↗</a>
         </div>
       </aside>

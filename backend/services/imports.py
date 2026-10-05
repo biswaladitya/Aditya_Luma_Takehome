@@ -18,7 +18,7 @@ def brief_case(row: dict, saved: dict | None) -> str:
     if not brief_changes(saved, row):
         return "info_only"
     view = product_view(saved)
-    # Same precedence as productStage in catalogApi.ts.
+    # Similar precedence to product_stage in catalog.py, but its own rule: these are import outcomes, not stages.
     if any((image["delivery"] or {}).get("state") != "delivered"
            for image in view["images"] if image["id"] in view["approved_image_ids"]):
         return "approved_not_in_drive"  # The approvals are kept and can still be saved.

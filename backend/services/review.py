@@ -14,7 +14,7 @@ from litestar.exceptions import HTTPException
 from backend import slack
 from backend.db import data_directory, database
 from backend.repositories import products, reviews
-from backend.services import catalog
+from backend.services import catalog, status_report
 from backend.services.catalog import product_view
 
 logger = logging.getLogger(__name__)
@@ -251,7 +251,8 @@ def _mark_outdated(items: list[dict]) -> None:
 def handle_block_action(payload: dict, client=None) -> str | None:
     """Dispatch a button click. Anyone may click unless SLACK_APPROVER_USER_ID is set, then only that user."""
     action = (payload.get("actions") or [{}])[0]
-    handlers = {APPROVE_ACTION: (_approve, "approve images"), MORE_ACTION: (_more_options, "request more options")}
+    handlers = {APPROVE_ACTION: (_approve, "approve images"), MORE_ACTION: (_more_options, "request more options"),
+                status_report.REFRESH_ACTION: (_refresh_status, "refresh the status report")}
     if action.get("action_id") not in handlers:
         return None
     handler, verb = handlers[action["action_id"]]
@@ -263,6 +264,16 @@ def handle_block_action(payload: dict, client=None) -> str | None:
         client.post_ephemeral(channel, user, f"Only the designated approver can {verb}.")
         return "unauthorized"
     return handler(action, payload, client, user, channel)
+
+
+def _refresh_status(action: dict, payload: dict, client, user: str, channel: str) -> str:
+    """Post a new report to the status channel; the clicked one stays as it was, button included."""
+    try:
+        status_report.send_report(requested_by=user)
+    except HTTPException as exc:
+        client.post_ephemeral(channel, user, f"The status report was not sent. {exc.detail}")
+        return "failed"
+    return "sent"
 
 
 def _more_options(action: dict, payload: dict, client, user: str, channel: str) -> str:

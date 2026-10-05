@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import CatalogView from './CatalogView'
-import { catalogRequest, deliverToDrive, generateImages, isDelivering, isGenerating, isInReview, sendForReview, type Catalog, type CatalogPreview } from './catalogApi'
+import { catalogRequest, deliverToDrive, generateImages, isDelivering, isGenerating, isInReview, sendForReview, sendStatusReport, type Catalog, type CatalogPreview } from './catalogApi'
 import { preparePicker } from './drivePicker'
 import { clearDriveToken, getDriveToken, prepareGoogleSignIn } from './googleAuth'
 import ImportReview from './ImportReview'
 import type { Actions } from './NextStep'
+
+type Banner = { title: string; text: string }
 
 const PENDING_IMPORT_KEY = 'luma.pendingImport'
 
@@ -25,11 +27,12 @@ export default function App() {
   const [preview, setPreview] = useState<CatalogPreview | null>(null)
   const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [loadError, setLoadError] = useState('')
-  const [banner, setBanner] = useState('')
+  const [banner, setBanner] = useState<Banner | null>(null)
   const [notice, setNotice] = useState('')
   const [generating, setGenerating] = useState(false)
   const [sendingToSlack, setSendingToSlack] = useState(false)
   const [writingToDrive, setWritingToDrive] = useState(false)
+  const [sendingStatus, setSendingStatus] = useState(false)
   const anyGenerating = Boolean(catalog?.rows.some(isGenerating))
   const anyInReview = Boolean(catalog?.rows.some(isInReview))
   const anyDelivering = Boolean(catalog?.rows.some(isDelivering))
@@ -80,7 +83,7 @@ export default function App() {
   async function applied(result: CatalogPreview) {
     choosePreview(null)
     const outdated = result.rows.filter(row => row.brief_case === 'with_ellie' || row.candidates_outdated).length
-    setBanner(`${result.changed_count} changed, ${result.new_count} new from ${result.filename}.${outdated ? ` Candidates for ${plural(outdated, 'product')} are now outdated.` : ''}`)
+    setBanner({ title: 'Catalog updated.', text: `${result.changed_count} changed, ${result.new_count} new from ${result.filename}.${outdated ? ` Candidates for ${plural(outdated, 'product')} are now outdated.` : ''}` })
     setView('catalog')
     await refresh().catch(cause => setLoadError(cause instanceof Error ? cause.message : 'Could not load the catalog.'))
   }
@@ -146,6 +149,20 @@ export default function App() {
     }
   }
 
+  async function sendStatus() {
+    if (sendingStatus) return
+    setSendingStatus(true)
+    setNotice('')
+    try {
+      const result = await sendStatusReport()
+      setBanner({ title: 'Status sent to Slack.', text: `${plural(result.products, 'product')} reported in the status channel.` })
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : 'Could not send the status to Slack.')
+    } finally {
+      setSendingStatus(false)
+    }
+  }
+
   const actions: Actions = {
     generate, send: skus => void sendToSlack(skus), deliver: (skus, confirmText) => void writeToDrive(skus, confirmText),
     generating, sending: sendingToSlack, saving: writingToDrive,
@@ -163,8 +180,9 @@ export default function App() {
       {loadError && <div className="page"><div className="error" role="alert">{loadError}</div></div>}
       {view === 'import'
         ? <ImportReview preview={preview} onPreview={choosePreview} onApplied={applied} onCancel={() => setView('catalog')} />
-        : <CatalogView catalog={catalog} actions={actions} banner={banner} onDismissBanner={() => setBanner('')}
-          notice={notice} onDismissNotice={() => setNotice('')} onImport={() => setView('import')} />}
+        : <CatalogView catalog={catalog} actions={actions} banner={banner} onDismissBanner={() => setBanner(null)}
+          notice={notice} onDismissNotice={() => setNotice('')} onImport={() => setView('import')}
+          onSendStatus={() => void sendStatus()} sendingStatus={sendingStatus} />}
     </div>
   )
 }

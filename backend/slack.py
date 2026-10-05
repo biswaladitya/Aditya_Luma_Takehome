@@ -35,6 +35,9 @@ class SlackClient:
     def post_ephemeral(self, channel: str, user: str, text: str) -> None:
         self._web.chat_postEphemeral(channel=channel, user=user, text=text)
 
+    def permalink(self, channel: str, ts: str) -> str:
+        return self._web.chat_getPermalink(channel=channel, message_ts=ts)["permalink"]
+
     def upload_image(self, path: Path, title: str, channel: str, thread_ts: str) -> str:
         """Upload straight into the thread; Slack rejects image blocks for unshared files."""
         response = self._web.files_upload_v2(

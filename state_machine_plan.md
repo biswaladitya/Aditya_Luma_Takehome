@@ -24,7 +24,7 @@ SKUs are uppercase only. The importer rejects a row whose SKU contains lowercase
 | State | Moves on when… |
 |---|---|
 | Needs brief | A CSV adds a complete brief |
-| Ready to generate | Someone clicks **Generate**, which generates two candidates **and posts them to Slack** |
+| Ready to generate | Someone clicks **Generate**, which generates four candidates **and posts them to Slack** |
 | *Generating and posting* (busy) | Candidates are posted to the product's Slack thread |
 | In Slack, waiting on Ellie | Ellie clicks **Approve** |
 | Approved, not in Drive | Someone clicks **Save to Drive** |
@@ -42,7 +42,7 @@ Failures go back one step with a Retry and the error visible: all candidates fai
 | Approved, not in Drive | The approval is **kept** and can still be saved | **Save to Drive**, plus optional **Regenerate** |
 | In Drive | Kept | Optional **Regenerate** |
 
-- Regenerating is **always an explicit click**, never automatic on import. Generate is the only action that spends credits.
+- Regenerating is **always an explicit click**, never automatic on import. Generate is the only action that spends credits (since then, also the More options button in Slack: `new_feature_additions.md`).
 - **Accept waits:** if a changed product has a generation, Slack post or Drive save in progress, Accept is refused with a clear 409 naming the SKUs ("wait for it to finish, then accept again").
 - **Every approved image can be saved to Drive.** Drive filenames include the image's own version number, `<SKU>_styled_v<N>.<ext>` (e.g. `HG-002_styled_v3.png`), so a save never overwrites a different image and no approved image is lost. Save to Drive saves every approved image of that product not yet in Drive.
 - Files already delivered under the old `<SKU>_styled_01.<ext>` name keep it; the filename is stored per delivery and is not renamed.
@@ -57,9 +57,9 @@ The local runtime database is already on v6, so this needs a v6 → v7 migration
 - `products.brief_version` (integer, starts at 1) goes up only when a brief field changes. `products.version` still goes up on any change; import conflict detection keeps using it.
 - `generated_images.brief_version` records the brief version at queue time.
 - **An image is outdated when its `brief_version` is lower than its product's.** This replaces field-by-field snapshot comparisons and the `superseded_at` / `retired_before` / `is_current` logic. Keep `generated_from` as the record of what was sent to Luma.
-- Approvals: at most one approved image per `(product, brief_version)` (replace the current partial unique index). Approvals are never set aside by imports. `superseded_at` is no longer used; migrate any superseded approval to an ordinary approval of its (older) brief version. Drop the column and trigger if SQLite migration allows it cleanly; otherwise leave the column unused and document it.
+- Approvals: at most three approved images per `(product, brief_version)`, counted in `reviews.approve` (schema version 2 dropped the one-approval unique index). One approval makes the product saveable to Drive; the third closes the review. Approvals are never set aside by imports. `superseded_at` is no longer used; migrate any superseded approval to an ordinary approval of its (older) brief version. Drop the column and trigger if SQLite migration allows it cleanly; otherwise leave the column unused and document it.
 - Migration backfill: for each product, group its existing images by their saved brief fields in `generated_at` order, number the groups 1..n, and set the product's `brief_version` to the group matching its current brief (or n + 1 if none matches).
-- The six-image cap counts non-failed images **per brief version**.
+- The 12-image cap (six before More options) counts non-failed images **per brief version**.
 
 ### 2. Import (`backend/services/imports.py`, `catalog.py`)
 

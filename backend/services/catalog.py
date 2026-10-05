@@ -31,6 +31,16 @@ GENERATION_STATUSES = (
 )
 ELIGIBLE = ("never_generated", "changed_since_generation")
 ACTIVE = ("queued", "processing")
+# The dashboard's tabs, in order: (id, label, stages). Every stage belongs to exactly one tab.
+TABS = (
+    ("generate", "To generate", ("ready", "failed")),
+    ("generating", "Generating", ("generating",)),
+    ("post", "Not posted", ("post_failed",)),
+    ("ellie", "With Ellie", ("with_ellie",)),
+    ("drive", "To Drive", ("approved", "saving")),
+    ("done", "In Drive", ("in_drive",)),
+    ("input", "Missing attributes", ("needs_input",)),
+)
 
 
 def attributes(row: dict) -> dict:
@@ -163,7 +173,29 @@ def product_view(row: dict) -> dict:
         status == "already_generated" and not result["approval_limit_reached"]
         and not result["cap_reached"] and not result["attempts_exhausted"])
     result["can_request_more"] = result["more_options_open"] and not result["generating"] and not result["delivering"]
+    result["stage"] = product_stage(result)
     return result
+
+
+def product_stage(view: dict) -> str:
+    """The one next step for a product (state_machine_plan.md). Order matters: the first match wins."""
+    if view["generating"]:
+        return "generating"
+    if view["delivering"]:
+        return "saving"
+    if view["can_deliver"]:
+        return "approved"
+    if view["review_status"] == "awaiting_approval":
+        return "with_ellie"
+    if view["can_send"]:
+        return "post_failed"
+    # The most recent request's candidates: the newest IMAGES_PER_REQUEST images by version.
+    batch = sorted(view["images"], key=lambda image: image["version"], reverse=True)[:IMAGES_PER_REQUEST]
+    if view["can_generate"] and any(image["status"] == "failed" for image in batch):
+        return "failed"
+    if view["delivery_status"] == "delivered":
+        return "in_drive"
+    return "ready" if view["can_generate"] else "needs_input"
 
 
 def brief_changes(before: dict, after: dict) -> dict:
@@ -219,6 +251,12 @@ def delivery_summary(done: list[dict]) -> dict:
     }
 
 
+def spend_total(rows: list[dict]) -> dict:
+    """Estimated generation spend: every image Luma returned, whatever happened to it afterwards."""
+    images = sum(image["luma_generation_id"] is not None for row in rows for image in row.get("images", []))
+    return {"images": images, "est_cost_usd": round(images * EST_COST_PER_IMAGE_USD, 4)}
+
+
 def summarize(rows: list[dict]) -> dict:
     with_idea = sum(bool(row["shot_idea"]) for row in rows)
     return {
@@ -238,9 +276,15 @@ def summarize(rows: list[dict]) -> dict:
 def get_catalog(*, candidates_only: bool = False) -> dict:
     with database() as connection:
         rows = [product_view(row) for row in products.get_products(connection)]
+    # Tabs and spend describe the whole catalog, also when only the candidates are listed.
+    status = {
+        "tabs": [{"id": tab, "label": label, "stages": list(stages),
+                  "count": sum(row["stage"] in stages for row in rows)} for tab, label, stages in TABS],
+        "spend": spend_total(rows),
+    }
     if candidates_only:
         rows = [row for row in rows if row["generation_status"] in ELIGIBLE]
-    return summarize(rows)
+    return {**summarize(rows), **status}
 
 
 def record_generated_image(
