@@ -1,0 +1,9 @@
+.git
+.venv
+.env
+.env.local
+.take-home-token
+frontend/node_modules
+frontend/dist
+__pycache__
+runtime
