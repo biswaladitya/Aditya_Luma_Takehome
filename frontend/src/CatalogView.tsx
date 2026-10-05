@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { canSelect, notSelected, rowImages, type Catalog, type CatalogRow, type GeneratedImage, type Stage } from './catalogApi'
 import ImageLightbox from './ImageLightbox'
 import { money, NextStep, StageLabel, type Actions } from './NextStep'
@@ -59,8 +59,18 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
   const [viewing, setViewing] = useState<{ sku: string; imageId: string } | null>(null)
   const perRequest = catalog?.generation_config.images_per_request ?? 4
   const unit = catalog?.generation_config.est_cost_per_image_usd ?? 0
-  const rows = useMemo(() => (catalog?.rows ?? []).map(row => ({ row, stage: row.stage }))
-    .sort((a, b) => SORT.indexOf(a.stage) - SORT.indexOf(b.stage) || a.row.sku.localeCompare(b.row.sku)), [catalog])
+  // Sorted by next step when a tab is opened; after that a row keeps its place as its stage changes,
+  // so clicking Generate doesn't send it down the list. Products that appear later go to the end.
+  const placed = useRef<{ tab: string; skus: string[] }>({ tab, skus: [] })
+  const rows = useMemo(() => {
+    const kept = placed.current.tab === tab ? placed.current.skus : []
+    const position = new Map(kept.map((sku, index) => [sku, index]))
+    const sorted = (catalog?.rows ?? []).map(row => ({ row, stage: row.stage }))
+      .sort((a, b) => SORT.indexOf(a.stage) - SORT.indexOf(b.stage) || a.row.sku.localeCompare(b.row.sku))
+      .sort((a, b) => (position.get(a.row.sku) ?? kept.length) - (position.get(b.row.sku) ?? kept.length))
+    placed.current = { tab, skus: sorted.map(item => item.row.sku) }
+    return sorted
+  }, [catalog, tab])
 
   // Drop selections that stopped being eligible after a reload or a finished job.
   useEffect(() => {
@@ -156,7 +166,7 @@ export default function CatalogView({ catalog, actions, banner, onDismissBanner,
           </div>
         })}
         {!visible.length && <p className="empty-row">No products at this stage.</p>}
-        <div className="panel-foot"><span>Showing {visible.length} of {catalog.total_rows}</span><span>Sorted by next step</span></div>
+        <div className="panel-foot"><span>Showing {visible.length} of {catalog.total_rows}</span><span>Sorted by next step · rows keep their place until you switch tabs</span></div>
       </div>
     </>}
 
